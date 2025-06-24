@@ -17,6 +17,7 @@
 
 #include "sense.h"
 
+#include <float.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
@@ -1084,13 +1085,15 @@ void sensor_Thread()
         trkset.getMagSiOff(magsioff);
 
         // Calibrate Hard Iron Offsets
-        magx = rmagx - magxoff;
-        magy = rmagy - magyoff;
-        magz = rmagz - magzoff;
+        float mag_temp[3];
+        mag_temp[0] = rmagx - magxoff;
+        mag_temp[1] = rmagy - magyoff;
+        mag_temp[2] = rmagz - magzoff;
 
-        magx = (magx * magsioff[0]) + (magy * magsioff[1]) + (magz * magsioff[2]);
-        magy = (magx * magsioff[3]) + (magy * magsioff[4]) + (magz * magsioff[5]);
-        magz = (magx * magsioff[6]) + (magy * magsioff[7]) + (magz * magsioff[8]);
+        // Optimized soft iron correction - calculate once and reuse
+        magx = (mag_temp[0] * magsioff[0]) + (mag_temp[1] * magsioff[1]) + (mag_temp[2] * magsioff[2]);
+        magy = (mag_temp[0] * magsioff[3]) + (mag_temp[1] * magsioff[4]) + (mag_temp[2] * magsioff[5]);
+        magz = (mag_temp[0] * magsioff[6]) + (mag_temp[1] * magsioff[7]) + (mag_temp[2] * magsioff[8]);
 
         // Apply Rotation
         float tmpmag[3] = {magx, magy, magz};
@@ -1322,35 +1325,53 @@ float normalize(const float value, const float start, const float end)
 }
 
 // Rotate, in Order X -> Y -> Z
-
+// NOTE: Thread-safe - only called from sensor_Thread() sequentially
+// Alternative thread-safe implementation (if needed in future):
+// static K_MUTEX_DEFINE(rotate_mutex);
+// k_mutex_lock(&rotate_mutex, K_FOREVER);
+// ... cache operations ...
+// k_mutex_unlock(&rotate_mutex);
 void rotate(float pn[3], const float rotation[3])
 {
-  float rot[3] = {0, 0, 0};
-  float out[3] = {0, 0, 0};
-  std::copy(rotation, rotation + 3, rot);
+  static float cached_rot[3] = {FLT_MAX, FLT_MAX, FLT_MAX};  // Cache for rotation values
+  static float sin_rot[3], cos_rot[3];           // Cached trig values
+  static float out[3];                           // Static to avoid allocation
 
-  // Passed in Degrees
-  rot[0] *= DEG_TO_RAD;
-  rot[1] *= DEG_TO_RAD;
-  rot[2] *= DEG_TO_RAD;
+  // Check if rotation values changed and update cache
+  // Use epsilon to prevent precision-induced cache misses that would break optimization
+  const float ROTATION_EPSILON = 0.001f;  // 0.001 degree tolerance
+  if (fabsf(cached_rot[0] - rotation[0]) > ROTATION_EPSILON || 
+      fabsf(cached_rot[1] - rotation[1]) > ROTATION_EPSILON || 
+      fabsf(cached_rot[2] - rotation[2]) > ROTATION_EPSILON) {
+    cached_rot[0] = rotation[0];
+    cached_rot[1] = rotation[1];
+    cached_rot[2] = rotation[2];
+
+    // Pre-calculate sin/cos values
+    for (int i = 0; i < 3; i++) {
+      float rot_rad = rotation[i] * DEG_TO_RAD;
+      sin_rot[i] = sinf(rot_rad);
+      cos_rot[i] = cosf(rot_rad);
+    }
+  }
 
   // X Rotation
-  out[0] = pn[0] * 1 + pn[1] * 0 + pn[2] * 0;
-  out[1] = pn[0] * 0 + pn[1] * cosf(rot[0]) - pn[2] * sinf(rot[0]);
-  out[2] = pn[0] * 0 + pn[1] * sinf(rot[0]) + pn[2] * cosf(rot[0]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0];
+  out[1] = pn[1] * cos_rot[0] - pn[2] * sin_rot[0];
+  out[2] = pn[1] * sin_rot[0] + pn[2] * cos_rot[0];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Y Rotation
-  out[0] = pn[0] * cosf(rot[1]) - pn[1] * 0 + pn[2] * sinf(rot[1]);
-  out[1] = pn[0] * 0 + pn[1] * 1 + pn[2] * 0;
-  out[2] = -pn[0] * sinf(rot[1]) + pn[1] * 0 + pn[2] * cosf(rot[1]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[1] + pn[2] * sin_rot[1];
+  out[1] = pn[1];
+  out[2] = -pn[0] * sin_rot[1] + pn[2] * cos_rot[1];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Z Rotation
-  out[0] = pn[0] * cosf(rot[2]) - pn[1] * sinf(rot[2]) + pn[2] * 0.0f;
-  out[1] = pn[0] * sinf(rot[2]) + pn[1] * cosf(rot[2]) + pn[2] * 0.0f;
-  out[2] = pn[0] * 0.0f + pn[1] * 0.0f + pn[2] * 1.0f;
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[2] - pn[1] * sin_rot[2];
+  out[1] = pn[0] * sin_rot[2] + pn[1] * cos_rot[2];
+  out[2] = pn[2];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 }
 
 /* reset_fusion()
