@@ -534,6 +534,7 @@ void calculate_Thread()
     for (int i = 0; i < 16; i++) channel_data[i] = 0;
 
     // 2) Read all PPM inputs
+#if 0
     PpmIn_execute();
     for (int i = 0; i < 16; i++)
       ppm_in_chans[i] = 0;  // Reset all PPM in channels to Zero (Not active)
@@ -543,8 +544,10 @@ void calculate_Thread()
         channel_data[i] = ppm_in_chans[i];
       }
     }
+#endif
 
     // 3) Set all incoming UART values (Sbus/Crsf)
+#if 0
     bool isUartValid = UartGetChannels(uart_in_chans);
     static bool lostmsgsent = false;
     static bool recmsgsent = false;
@@ -565,8 +568,10 @@ void calculate_Thread()
       }
       lostmsgsent = false;
     }
+#endif
 
     // 4) Set all incoming BT values
+#if 0
     // Bluetooth cannot send a zero value for a channel with PARA. Radios see this as invalid data.
     // So, if the data is coming from a BLE head unit it also has a characteristic to nofity which
     // ones are valid alloww PPM/SBUS pass through on the head or remote boards on ch 1-8
@@ -582,6 +587,7 @@ void calculate_Thread()
         channel_data[i] = btvalue;
       }
     }
+#endif
 
     // 5) If selected input channel went > 1800us reset the center
     // wait for it to drop below 1700 before allowing another reset
@@ -598,6 +604,7 @@ void calculate_Thread()
     }*/ //REMOVED as of V2.1
 
     // 6) Set Auxiliary Functions
+#if 0
     int aux0ch = trkset.getAux0Ch();
     int aux1ch = trkset.getAux1Ch();
     int aux2ch = trkset.getAux2Ch();
@@ -607,6 +614,7 @@ void calculate_Thread()
       if (aux1ch > 0) channel_data[aux1ch - 1] = auxdata[trkset.getAux1Func()];
       if (aux2ch > 0) channel_data[aux2ch - 1] = auxdata[trkset.getAux2Func()];
     }
+#endif
 
     // 7) Set Analog Channels
     // Battery voltage monitor is always analog zero if it has the feature
@@ -708,6 +716,7 @@ void calculate_Thread()
     }
 
     // 10) Set the PPM Outputs
+#if 0
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
       uint16_t ppmout = channel_data[i];
@@ -721,6 +730,7 @@ void calculate_Thread()
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
       BTSetChannel(i, channel_data[i]);
     }
+#endif
 
     // 12) Set all UART output channels, if disabled(0) set to center
     uint16_t uart_data[16];
@@ -733,6 +743,7 @@ void calculate_Thread()
     UartSetChannels(uart_data);
 
     // 13) Set PWM Channels
+#if 0
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
@@ -742,13 +753,16 @@ void calculate_Thread()
         setPWMValue(i, pwmout);
       }
     }
+#endif
 
     // 14 Set USB Joystick Channels, Only 8 channels, Half rate or USB is overwhelmed
+#if 0
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
       set_JoystickChannels(channel_data);
     }
+#endif
 
     // Update the settings for the GUI
     // Serial also uses this data, make sure writes are complete.
