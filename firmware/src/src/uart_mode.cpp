@@ -126,7 +126,7 @@ void uartTx_Thread()
         k_usleep((1.0f / (float)trkset.getSbusTxRate()) * 1.0e6f);
         break;
       case UARTCRSFOUT:
-        k_usleep((1.0f / (float)trkset.getCrsfTxRate()) * 1.0e6f);
+        k_usleep((1.0f / (float)(trkset.getCrsfTxRate() * 4)) * 1.0e6f);
         crsfout.sendRCFrameToFC();
         /*crsfout.AttitudeDataOut.pitch = 10;
         crsfout.AttitudeDataOut.roll = 30;
