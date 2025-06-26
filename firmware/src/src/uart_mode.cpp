@@ -226,7 +226,7 @@ void UartSetChannels(uint16_t channels[16])
       crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channels[13]);
       crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channels[14]);
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channels[15]);
-      crsfout.LinkStatistics.rf_Mode = RATE_LORA_100HZ_8CH;
+      crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
       break;
     default:
       break;
