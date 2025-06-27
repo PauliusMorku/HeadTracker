@@ -65,6 +65,10 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
+#include "CRSF/crsfout.h"
+extern CRSF crsfout;
+extern uint16_t US_to_CRSF(uint16_t val);
+
 // #define DEBUG_SENSOR_RATES
 
 void gyroCalibrate();
@@ -530,7 +534,8 @@ void calculate_Thread()
      */
 
     // 1) Reset all Channels to zero which means they have no data
-    for (int i = 0; i < 16; i++) channel_data[i] = 0;
+    static uint16_t local_channel_data[16];
+    for (int i = 0; i < 16; i++) local_channel_data[i] = 0;
 
     // 2) Read all PPM inputs
 #if 0
@@ -540,7 +545,7 @@ void calculate_Thread()
     int ppm_in_chcnt = PpmIn_getChannels(ppm_in_chans);
     if (ppm_in_chcnt >= 4 && ppm_in_chcnt <= 16) {
       for (int i = 0; i < MIN(ppm_in_chcnt, 16); i++) {
-        channel_data[i] = ppm_in_chans[i];
+        local_channel_data[i] = ppm_in_chans[i];
       }
     }
 #endif
@@ -559,7 +564,7 @@ void calculate_Thread()
       // SBUS data still valid, set the channel values to the last SBUS
     } else {
       for (int i = 0; i < 16; i++) {
-        channel_data[i] = uart_in_chans[i];
+        local_channel_data[i] = uart_in_chans[i];
       }
       if (!recmsgsent) {
         LOG_DBG("Uart(SBUS/CRSF) Data Received");
@@ -583,7 +588,7 @@ void calculate_Thread()
       uint16_t btvalue = BTGetChannel(i);
       if (btvalue > 0) {
         bt_chans[i] = btvalue;
-        channel_data[i] = btvalue;
+        local_channel_data[i] = btvalue;
       }
     }
 #endif
@@ -593,11 +598,11 @@ void calculate_Thread()
     /*int rstppmch = trkset.resetCntPPM() - 1;
     static bool hasrstppm=false;
     if(rstppmch >= 0 && rstppmch < 16) {
-        if(channel_data[rstppmch] > 1800 && hasrstppm == false) {
+        if(local_channel_data[rstppmch] > 1800 && hasrstppm == false) {
             LOG_INF("Reset Center - Input Channel %d > 1800us", rstppmch+1);
             pressButton();
             hasrstppm = true;
-        } else if (channel_data[rstppmch] < 1700 && hasrstppm == true) {
+        } else if (local_channel_data[rstppmch] < 1700 && hasrstppm == true) {
             hasrstppm = false;
         }
     }*/ //REMOVED as of V2.1
@@ -609,9 +614,9 @@ void calculate_Thread()
     int aux2ch = trkset.getAux2Ch();
     if (aux0ch > 0 || aux1ch > 0 || aux2ch > 0) {
       buildAuxData();
-      if (aux0ch > 0) channel_data[aux0ch - 1] = auxdata[trkset.getAux0Func()];
-      if (aux1ch > 0) channel_data[aux1ch - 1] = auxdata[trkset.getAux1Func()];
-      if (aux2ch > 0) channel_data[aux2ch - 1] = auxdata[trkset.getAux2Func()];
+      if (aux0ch > 0) local_channel_data[aux0ch - 1] = auxdata[trkset.getAux0Func()];
+      if (aux1ch > 0) local_channel_data[aux1ch - 1] = auxdata[trkset.getAux1Func()];
+      if (aux2ch > 0) local_channel_data[aux2ch - 1] = auxdata[trkset.getAux2Func()];
     }
 #endif
 
@@ -630,7 +635,7 @@ void calculate_Thread()
       an4 += trkset.getAn0Off();
       an4 += TrackerSettings::MIN_PWM;
       an4 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an4));
-      channel_data[trkset.getAn0Ch() - 1] = an4;
+      local_channel_data[trkset.getAn0Ch() - 1] = an4;
     }
 #endif
 #ifdef AN1
@@ -640,7 +645,7 @@ void calculate_Thread()
       an5 += trkset.getAn1Off();
       an5 += TrackerSettings::MIN_PWM;
       an5 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an5));
-      channel_data[trkset.getAn1Ch() - 1] = an5;
+      local_channel_data[trkset.getAn1Ch() - 1] = an5;
     }
 #endif
 #ifdef AN2
@@ -650,7 +655,7 @@ void calculate_Thread()
       an6 += trkset.getAn2Off();
       an6 += TrackerSettings::MIN_PWM;
       an6 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an6));
-      channel_data[trkset.getAn2Ch() - 1] = an6;
+      local_channel_data[trkset.getAn2Ch() - 1] = an6;
     }
 #endif
 #ifdef AN3
@@ -660,7 +665,7 @@ void calculate_Thread()
       an7 += trkset.getAn3Off();
       an7 += TrackerSettings::MIN_PWM;
       an7 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an7));
-      channel_data[trkset.getAn3Ch() - 1] = an7;
+      local_channel_data[trkset.getAn3Ch() - 1] = an7;
     }
 #endif
 
@@ -670,13 +675,13 @@ void calculate_Thread()
     int alertch = trkset.getAlertCh();
     if (alertch > 0) {
       // Synthesize a pulse indicating reset center started
-      channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
+      local_channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
       if (butdnw) {
         sendingresetpulse = true;
         pulsetimer = 0;
       }
       if (sendingresetpulse) {
-        channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
+        local_channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
         pulsetimer += (float)CALCULATE_PERIOD / 1000000.0f;
         if (pulsetimer > TrackerSettings::RECENTER_PULSE_DURATION) {
           sendingresetpulse = false;
@@ -698,27 +703,29 @@ void calculate_Thread()
     }
     lastbutmode = buttonpresmode;
 
+#if 0 // Done in Sensor Thread
     int tltch = trkset.getTltCh();
     int rllch = trkset.getRllCh();
     int panch = trkset.getPanCh();
     if (tltch > 0)
-      channel_data[tltch - 1] = trpOutputEnabled == true ? tiltout_ui : trkset.getTlt_Cnt();
+      local_channel_data[tltch - 1] = trpOutputEnabled == true ? tiltout_ui : trkset.getTlt_Cnt();
     if (rllch > 0)
-      channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
+      local_channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
     if (panch > 0)
-      channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
+      local_channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
+#endif
 
     // If uart output set to CRSF_OUT, force channel 5 (AUX1/ARM) to high, will override all other
     // channels
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-      if (trkset.getCh5Arm()) channel_data[4] = 2000;
+      if (trkset.getCh5Arm()) local_channel_data[4] = 2000;
     }
 
     // 10) Set the PPM Outputs
 #if 0
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
-      uint16_t ppmout = channel_data[i];
+      uint16_t ppmout = local_channel_data[i];
       if (ppmout == 0) ppmout = TrackerSettings::PPM_CENTER;
       PpmOut_setChannel(i, ppmout);
     }
@@ -727,19 +734,21 @@ void calculate_Thread()
     bool bleconnected = BTGetConnected();
     trkset.setDataBtAddr(BTGetAddress());
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
-      BTSetChannel(i, channel_data[i]);
+      BTSetChannel(i, local_channel_data[i]);
     }
 #endif
 
     // 12) Set all UART output channels, if disabled(0) set to center
+#if 0 // Done in Sensor Thread
     uint16_t uart_data[16];
     for (int i = 0; i < 16; i++) {
-      if (channel_data[i] == 0)
+      if (local_channel_data[i] == 0)
         uart_data[i] = TrackerSettings::PPM_CENTER;
       else
-        uart_data[i] = channel_data[i];
+        uart_data[i] = local_channel_data[i];
     }
     UartSetChannels(uart_data);
+#endif
 
     // 13) Set PWM Channels
 #if 0
@@ -747,7 +756,7 @@ void calculate_Thread()
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
       if (pwmch >= 0 && pwmch < 16) {
-        uint16_t pwmout = channel_data[pwmch];
+        uint16_t pwmout = local_channel_data[pwmch];
         if (pwmout == 0) pwmout = TrackerSettings::PPM_CENTER;
         setPWMValue(i, pwmout);
       }
@@ -759,7 +768,7 @@ void calculate_Thread()
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
-      set_JoystickChannels(channel_data);
+      set_JoystickChannels(local_channel_data);
     }
 #endif
 
@@ -811,7 +820,7 @@ void calculate_Thread()
       trkset.setDataPpmCh(ppm_in_chans);
       trkset.setDataBtCh(bt_chans);
       trkset.setDataUartCh(uart_in_chans);
-      trkset.setDataChOut(channel_data);
+      trkset.setDataChOut(local_channel_data);
 
       trkset.setDataTrpEnabled(trpOutputEnabled);
       trkset.setDataGyroCal(gyroCalibrated);
@@ -822,6 +831,17 @@ void calculate_Thread()
 
       // Bluetooth connected
       trkset.setDataBtCon(bleconnected);
+
+      int tlti = trkset.getTltCh()-1;
+      int rlli = trkset.getRllCh()-1;
+      int pani = trkset.getPanCh()-1;
+      for (int i = 0; i < 16; i++) {
+        if (i == tlti || i == rlli || i == pani) {
+          continue;
+        }
+        channel_data[i] = local_channel_data[i];
+      }
+
       k_mutex_unlock(&data_mutex);
     }
 
@@ -1191,16 +1211,68 @@ void sensor_Thread()
       }
     }
 
-    k_mutex_unlock(&sensor_mutex);
+    // Fast CRSF mode - send CRSF directly from sensor thread for minimum latency
+    if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
+
+      // Calculate outputs
+      float tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
+      float rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
+      float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
+
+      // Convert to channel values
+      uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();
+      tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());
+      uint16_t rollout_ui = rollout + trkset.getRll_Cnt();
+      rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());
+      uint16_t panout_ui = panout + trkset.getPan_Cnt();
+      panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());
+
+      // Set head tracking channels
+      if (trpOutputEnabled) {
+        int tltch = trkset.getTltCh();
+        int rllch = trkset.getRllCh();
+        int panch = trkset.getPanCh();
+        if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = tiltout_ui;
+        if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = rollout_ui;
+        if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
+      }
+
+      crsfout.PackedRCdataOut.ch0 = US_to_CRSF(channel_data[0]);
+      crsfout.PackedRCdataOut.ch1 = US_to_CRSF(channel_data[1]);
+      crsfout.PackedRCdataOut.ch2 = US_to_CRSF(channel_data[2]);
+      crsfout.PackedRCdataOut.ch3 = US_to_CRSF(channel_data[3]);
+      crsfout.PackedRCdataOut.ch4 = US_to_CRSF(channel_data[4]);
+      crsfout.PackedRCdataOut.ch5 = US_to_CRSF(channel_data[5]);
+      crsfout.PackedRCdataOut.ch6 = US_to_CRSF(channel_data[6]);
+      crsfout.PackedRCdataOut.ch7 = US_to_CRSF(channel_data[7]);
+      crsfout.PackedRCdataOut.ch8 = US_to_CRSF(channel_data[8]);
+      crsfout.PackedRCdataOut.ch9 = US_to_CRSF(channel_data[9]);
+      crsfout.PackedRCdataOut.ch10 = US_to_CRSF(channel_data[10]);
+      crsfout.PackedRCdataOut.ch11 = US_to_CRSF(channel_data[11]);
+      crsfout.PackedRCdataOut.ch12 = US_to_CRSF(channel_data[12]);
+      crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channel_data[13]);
+      crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channel_data[14]);
+      crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channel_data[15]);
+      crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
+
+      crsfout.sendRCFrameToFC();
+    }
 
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
-    if (SENSOR_PERIOD - senseUsDuration <
-        SENSOR_PERIOD * 0.4) {  // Took a long time. Will crash if sleep is too short
+
+    // In fast CRSF mode, run sensor thread faster to minimize latency
+    uint32_t sensorPeriod = SENSOR_PERIOD;
+    if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
+      sensorPeriod = (1.0f / (float)(trkset.getCrsfTxRate() * 4)) * 1.0e6f;
+    }
+
+    if (sensorPeriod - senseUsDuration <
+        sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
-      k_usleep(SENSOR_PERIOD);
+      k_usleep(sensorPeriod);
     } else {
-      k_usleep(SENSOR_PERIOD - senseUsDuration);
+      k_usleep(sensorPeriod - senseUsDuration);
     }
 
 #if defined(DEBUG_SENSOR_RATES)
