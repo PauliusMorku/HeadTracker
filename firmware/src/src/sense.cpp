@@ -83,9 +83,6 @@ static float magx = 0, magy = 0, magz = 0;
 static float gyrx = 0, gyry = 0, gyrz = 0;
 static float tilt = 0, roll = 0, pan = 0;
 static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
-static float magxoff = 0, magyoff = 0, magzoff = 0;
-static float accxoff = 0, accyoff = 0, acczoff = 0;
-static float gyrxoff = 0, gyryoff = 0, gyrzoff = 0;
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
 
@@ -1066,13 +1063,10 @@ void sensor_Thread()
       raccx = tacc[0];
       raccy = tacc[1];
       raccz = tacc[2];
-      accxoff = trkset.getAccXOff();
-      accyoff = trkset.getAccYOff();
-      acczoff = trkset.getAccZOff();
 
-      accx = raccx - accxoff;
-      accy = raccy - accyoff;
-      accz = raccz - acczoff;
+      accx = raccx - trkset.getAccXOff();
+      accy = raccy - trkset.getAccYOff();
+      accz = raccz - trkset.getAccZOff();
 
       // Apply Rotation
       float tmpacc[3] = {accx, accy, accz};
@@ -1090,13 +1084,10 @@ void sensor_Thread()
       rgyrx = tgyr[0];
       rgyry = tgyr[1];
       rgyrz = tgyr[2];
-      gyrxoff = trkset.getGyrXOff();
-      gyryoff = trkset.getGyrYOff();
-      gyrzoff = trkset.getGyrZOff();
 
-      gyrx = rgyrx - gyrxoff;
-      gyry = rgyry - gyryoff;
-      gyrz = rgyrz - gyrzoff;
+      gyrx = rgyrx - trkset.getGyrXOff();
+      gyry = rgyry - trkset.getGyrYOff();
+      gyrz = rgyrz - trkset.getGyrZOff();
 
       // Apply Rotation
       float tmpgyr[3] = {gyrx, gyry, gyrz};
@@ -1112,17 +1103,16 @@ void sensor_Thread()
         rmagx = tmag[0];
         rmagy = tmag[1];
         rmagz = tmag[2];
+
+        // Get Soft Iron Offsets
         float magsioff[9];
-        magxoff = trkset.getMagXOff();
-        magyoff = trkset.getMagYOff();
-        magzoff = trkset.getMagZOff();
         trkset.getMagSiOff(magsioff);
 
         // Calibrate Hard Iron Offsets
         float mag_temp[3];
-        mag_temp[0] = rmagx - magxoff;
-        mag_temp[1] = rmagy - magyoff;
-        mag_temp[2] = rmagz - magzoff;
+        mag_temp[0] = rmagx - trkset.getMagXOff();
+        mag_temp[1] = rmagy - trkset.getMagYOff();
+        mag_temp[2] = rmagz - trkset.getMagZOff();
 
         // Optimized soft iron correction - calculate once and reuse
         magx = (mag_temp[0] * magsioff[0]) + (mag_temp[1] * magsioff[1]) + (mag_temp[2] * magsioff[2]);
@@ -1212,31 +1202,32 @@ void sensor_Thread()
     }
 
     // Fast CRSF mode - send CRSF directly from sensor thread for minimum latency
+    // Calculate outputs
+    float tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
+    float rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
+    float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
+
+    // Convert to channel values
+    uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();
+    tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());
+    uint16_t rollout_ui = rollout + trkset.getRll_Cnt();
+    rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());
+    uint16_t panout_ui = panout + trkset.getPan_Cnt();
+    panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());
+
+    // Set head tracking channels
+    if (trpOutputEnabled) {
+      int tltch = trkset.getTltCh();
+      int rllch = trkset.getRllCh();
+      int panch = trkset.getPanCh();
+      if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = tiltout_ui;
+      if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = rollout_ui;
+      if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
+    }
+
+    k_mutex_unlock(&sensor_mutex); //TODO should be removed
+
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-
-      // Calculate outputs
-      float tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
-      float rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
-      float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
-
-      // Convert to channel values
-      uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();
-      tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());
-      uint16_t rollout_ui = rollout + trkset.getRll_Cnt();
-      rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());
-      uint16_t panout_ui = panout + trkset.getPan_Cnt();
-      panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());
-
-      // Set head tracking channels
-      if (trpOutputEnabled) {
-        int tltch = trkset.getTltCh();
-        int rllch = trkset.getRllCh();
-        int panch = trkset.getPanCh();
-        if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = tiltout_ui;
-        if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = rollout_ui;
-        if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
-      }
-
       crsfout.PackedRCdataOut.ch0 = US_to_CRSF(channel_data[0]);
       crsfout.PackedRCdataOut.ch1 = US_to_CRSF(channel_data[1]);
       crsfout.PackedRCdataOut.ch2 = US_to_CRSF(channel_data[2]);
@@ -1377,9 +1368,9 @@ void gyroCalibrate()
       k_mutex_unlock(&data_mutex);
 
       // Check if they differ from the flash values and save if out of range
-      if (fabsf(gyrxoff - filt_gyrx) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyryoff - filt_gyry) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyrzoff - filt_gyrz) > GYRO_FLASH_IF_OFFSET) {
+      if (fabsf(trkset.getGyrXOff() - filt_gyrx) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(trkset.getGyrYOff() - filt_gyry) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(trkset.getGyrZOff() - filt_gyrz) > GYRO_FLASH_IF_OFFSET) {
         if (!sent_gyro_cal_msg) {
           k_sem_give(&saveToFlash_sem);
           LOG_INF("Gyro calibration differs from saved value. Updating flash, x=%.3f,y=%.3f,z=%.3f",
