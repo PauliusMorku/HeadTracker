@@ -1111,7 +1111,7 @@ void sensor_Thread()
         tmag.y -= trkset.getMagYOff();
         tmag.z -= trkset.getMagZOff();
 
-        // Optimized soft iron correction - calculate once and reuse
+        // Optimized soft iron correction
         mag.x = (tmag.x * magsioff[0]) + (tmag.y * magsioff[1]) + (tmag.z * magsioff[2]);
         mag.y = (tmag.x * magsioff[3]) + (tmag.y * magsioff[4]) + (tmag.z * magsioff[5]);
         mag.z = (tmag.x * magsioff[6]) + (tmag.y * magsioff[7]) + (tmag.z * magsioff[8]);
