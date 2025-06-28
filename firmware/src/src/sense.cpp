@@ -1106,16 +1106,15 @@ void sensor_Thread()
         float magsioff[9];
         trkset.getMagSiOff(magsioff);
 
-        // Calibrate Hard Iron Offsets
-        axis_t mag_temp;
-        mag_temp.x = rmag.x - trkset.getMagXOff();
-        mag_temp.y = rmag.y - trkset.getMagYOff();
-        mag_temp.z = rmag.z - trkset.getMagZOff();
+        // Calibrate Hard Iron Offsets - reuse tmag
+        tmag.x -= trkset.getMagXOff();
+        tmag.y -= trkset.getMagYOff();
+        tmag.z -= trkset.getMagZOff();
 
         // Optimized soft iron correction - calculate once and reuse
-        mag.x = (mag_temp.x * magsioff[0]) + (mag_temp.y * magsioff[1]) + (mag_temp.z * magsioff[2]);
-        mag.y = (mag_temp.x * magsioff[3]) + (mag_temp.y * magsioff[4]) + (mag_temp.z * magsioff[5]);
-        mag.z = (mag_temp.x * magsioff[6]) + (mag_temp.y * magsioff[7]) + (mag_temp.z * magsioff[8]);
+        mag.x = (tmag.x * magsioff[0]) + (tmag.y * magsioff[1]) + (tmag.z * magsioff[2]);
+        mag.y = (tmag.x * magsioff[3]) + (tmag.y * magsioff[4]) + (tmag.z * magsioff[5]);
+        mag.z = (tmag.x * magsioff[6]) + (tmag.y * magsioff[7]) + (tmag.z * magsioff[8]);
 
         // Apply Rotation
         rotate(mag.data, rotation);
