@@ -126,7 +126,6 @@ unix:!macx {
 #Mac Specific
 macx: {
     DEFINES += "MACOS=yes"
-    ICON = images/iconbuilder.icns
 }
 
 DISTFILES +=
