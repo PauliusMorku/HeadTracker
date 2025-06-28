@@ -81,6 +81,14 @@ typedef union {
 void gyroCalibrate();
 void detectDoubleTap();
 
+inline float magnitude(const axis_t& v) {
+  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
+  return MAX(MIN((uint16_t)value, max_val), min_val);
+}
+
 static float auxdata[10];
 static axis_t racc = {{0, 0, 0}};
 static axis_t rmag = {{0, 0, 0}};
@@ -441,12 +449,9 @@ void calculate_Thread()
       LOG_ERR("Sensor Mutex Lock Failed");
     }
 
-    uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();  // Apply Center Offset
-    tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());  // Limit Output
-    uint16_t rollout_ui = rollout + trkset.getRll_Cnt();  // Apply Center Offset
-    rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());  // Limit Output
-    uint16_t panout_ui = panout + trkset.getPan_Cnt();  // Apply Center Offset
-    panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());  // Limit Output
+  uint16_t tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
+  uint16_t rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
+  uint16_t panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
 
     // If button was pressed and this is a remote bluetooth boart send the button press back
     static bool btbtnupdated = false;
@@ -1191,12 +1196,9 @@ void sensor_Thread()
     float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
 
     // Convert to channel values
-    uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();
-    tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());
-    uint16_t rollout_ui = rollout + trkset.getRll_Cnt();
-    rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());
-    uint16_t panout_ui = panout + trkset.getPan_Cnt();
-    panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());
+    uint16_t tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
+    uint16_t rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
+    uint16_t panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
 
     // Set head tracking channels
     if (trpOutputEnabled) {
@@ -1275,7 +1277,7 @@ void detectDoubleTap()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float acc_magnitude = sqrtf(racc.x * racc.x + racc.y * racc.y + racc.z * racc.z);
+  float acc_magnitude = magnitude(racc);
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
   last_acc_mag = acc_magnitude;
 
@@ -1315,8 +1317,8 @@ void gyroCalibrate()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float gyro_magnitude = sqrtf(rgyr.x * rgyr.x + rgyr.y * rgyr.y + rgyr.z * rgyr.z);
-  float acc_magnitude = sqrtf(racc.x * racc.x + racc.y * racc.y + racc.z * racc.z);
+  float gyro_magnitude = magnitude(rgyr);
+  float acc_magnitude = magnitude(racc);
   float gyro_dif = (gyro_magnitude - last_gyro_mag) / deltatime;
   last_gyro_mag = gyro_magnitude;
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
