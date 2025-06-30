@@ -1160,18 +1160,13 @@ void sensor_Thread()
       if (madgsensbits == MADGINIT_READY) {
         madgsensbits = 0;
         madgreads++;
-        aacc.x += acc.x;
-        aacc.y += acc.y;
-        aacc.z += acc.z;
-        aacc.x /= 2;
-        aacc.y /= 2;
-        aacc.z /= 2;
-        amag.x += mag.x;
-        amag.y += mag.y;
-        amag.z += mag.z;
-        amag.x /= 2;
-        amag.y /= 2;
-        amag.z /= 2;
+        float inv_count = 1.0f / madgreads;
+        aacc.x += (acc.x - aacc.x) * inv_count;
+        aacc.y += (acc.y - aacc.y) * inv_count;
+        aacc.z += (acc.z - aacc.z) * inv_count;
+        amag.x += (mag.x - amag.x) * inv_count;
+        amag.y += (mag.y - amag.y) * inv_count;
+        amag.z += (mag.z - amag.z) * inv_count;
       }
 
       // Got the averaged values, apply the initial orientation.
