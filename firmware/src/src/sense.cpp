@@ -81,8 +81,19 @@ typedef union {
 void gyroCalibrate();
 void detectDoubleTap();
 
-inline float magnitude(const axis_t& v) {
-  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+
+// Optimized magnitude calculation with caching for frequently called contexts
+inline float magnitude_cached(const axis_t& v, axis_t& last_v, float& cached_result) {
+  const float MAGNITUDE_EPSILON = 0.01f; // Cache tolerance
+  
+  // Only recalculate if vector changed significantly
+  if (fabsf(v.x - last_v.x) > MAGNITUDE_EPSILON || 
+      fabsf(v.y - last_v.y) > MAGNITUDE_EPSILON || 
+      fabsf(v.z - last_v.z) > MAGNITUDE_EPSILON) {
+    cached_result = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    last_v = v;
+  }
+  return cached_result;
 }
 
 inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
@@ -1265,8 +1276,9 @@ void sensor_Thread()
 
 void detectDoubleTap()
 {
-
   static float last_acc_mag = 0;
+  static float cached_acc_mag = 0;
+  static axis_t last_racc = {{FLT_MAX, FLT_MAX, FLT_MAX}};
   static uint64_t lasttaptime = 0;
   static uint64_t lasttime = 0;
   uint64_t time = millis64();
@@ -1276,7 +1288,7 @@ void detectDoubleTap()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float acc_magnitude = magnitude(racc);
+  float acc_magnitude = magnitude_cached(racc, last_racc, cached_acc_mag);
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
   last_acc_mag = acc_magnitude;
 
@@ -1299,6 +1311,10 @@ void gyroCalibrate()
 {
   static float last_gyro_mag = 0;
   static float last_acc_mag = 0;
+  static float cached_gyro_mag = 0;
+  static float cached_acc_mag = 0;
+  static axis_t last_rgyr = {{FLT_MAX, FLT_MAX, FLT_MAX}};
+  static axis_t last_racc = {{FLT_MAX, FLT_MAX, FLT_MAX}};
   static axis_t filt_gyro = {{0, 0, 0}};
   static bool sent_gyro_cal_msg = false;
   static uint32_t filter_samples = 0;
@@ -1316,8 +1332,8 @@ void gyroCalibrate()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float gyro_magnitude = magnitude(rgyr);
-  float acc_magnitude = magnitude(racc);
+  float gyro_magnitude = magnitude_cached(rgyr, last_rgyr, cached_gyro_mag);
+  float acc_magnitude = magnitude_cached(racc, last_racc, cached_acc_mag);
   float gyro_dif = (gyro_magnitude - last_gyro_mag) / deltatime;
   last_gyro_mag = gyro_magnitude;
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
@@ -1333,9 +1349,13 @@ void gyroCalibrate()
       sent_gyro_cal_msg = false;
       filter_samples++;
     } else if (filter_samples < GYRO_STABLE_SAMPLES) {
-      filt_gyro.x = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.x) + (GYRO_SAMPLE_WEIGHT * rgyr.x);
-      filt_gyro.y = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.y) + (GYRO_SAMPLE_WEIGHT * rgyr.y);
-      filt_gyro.z = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.z) + (GYRO_SAMPLE_WEIGHT * rgyr.z);
+      // Pre-calculate constants to avoid repeated computation
+      static const float GYRO_FILTER_COEFF_OLD = 1.0f - GYRO_SAMPLE_WEIGHT;
+      static const float GYRO_FILTER_COEFF_NEW = GYRO_SAMPLE_WEIGHT;
+      
+      filt_gyro.x = (GYRO_FILTER_COEFF_OLD * filt_gyro.x) + (GYRO_FILTER_COEFF_NEW * rgyr.x);
+      filt_gyro.y = (GYRO_FILTER_COEFF_OLD * filt_gyro.y) + (GYRO_FILTER_COEFF_NEW * rgyr.y);
+      filt_gyro.z = (GYRO_FILTER_COEFF_OLD * filt_gyro.z) + (GYRO_FILTER_COEFF_NEW * rgyr.z);
       filter_samples++;
     } else if (filter_samples == GYRO_STABLE_SAMPLES) {
       LOG_INF("Gyro Calibrated, x=%.3f,y=%.3f,z=%.3f", (double)filt_gyro.x, (double)filt_gyro.y,
