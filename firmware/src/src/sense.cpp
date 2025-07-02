@@ -84,7 +84,7 @@ void detectDoubleTap();
 
 // Optimized magnitude calculation with caching for frequently called contexts
 inline float magnitude_cached(const axis_t& v, axis_t& last_v, float& cached_result) {
-  const float MAGNITUDE_EPSILON = 0.01f; // Cache tolerance
+  const float MAGNITUDE_EPSILON = 0.05f; // Cache tolerance - optimized for head tracker
   
   // Only recalculate if vector changed significantly
   if (fabsf(v.x - last_v.x) > MAGNITUDE_EPSILON || 
@@ -326,8 +326,8 @@ int sense_Init()
   mpu_set_sensors(INV_XYZ_GYRO | INV_XYZ_ACCEL);
   mpu_set_gyro_fsr(2000);
   mpu_set_accel_fsr(2);
-  mpu_set_sample_rate(1000);
-  mpu_set_lpf(188);
+  mpu_set_sample_rate(300);
+  // mpu_set_lpf(188);
   mpu_configure_fifo(INV_XYZ_GYRO | INV_XYZ_ACCEL);
   hasAcc = true;
   hasGyr = true;
@@ -720,16 +720,21 @@ void calculate_Thread()
 #endif
 
     // 12) Set all UART output channels, if disabled(0) set to center
-#if 0 // Done in Sensor Thread
-    uint16_t uart_data[16];
+    int tlti = trkset.getTltCh()-1;
+    int rlli = trkset.getRllCh()-1;
+    int pani = trkset.getPanCh()-1;   
+    k_sched_lock();
     for (int i = 0; i < 16; i++) {
-      if (local_channel_data[i] == 0)
-        uart_data[i] = TrackerSettings::PPM_CENTER;
-      else
-        uart_data[i] = local_channel_data[i];
+      if (i == tlti || i == rlli || i == pani) {
+        continue;
+      }
+      if (local_channel_data[i] == 0) {
+        channel_data[i] = TrackerSettings::PPM_CENTER;
+      } else {
+        channel_data[i] = local_channel_data[i];
+      }
     }
-    UartSetChannels(uart_data);
-#endif
+    k_sched_unlock();
 
     // 13) Set PWM Channels
 #if 0
@@ -798,19 +803,8 @@ void calculate_Thread()
       // Bluetooth connected
       trkset.setDataBtCon(bleconnected);
 
-      int tlti = trkset.getTltCh()-1;
-      int rlli = trkset.getRllCh()-1;
-      int pani = trkset.getPanCh()-1;
       k_mutex_unlock(&data_mutex);
 
-      k_sched_lock();
-      for (int i = 0; i < 16; i++) {
-        if (i == tlti || i == rlli || i == pani) {
-          continue;
-        }
-        channel_data[i] = local_channel_data[i];
-      }
-      k_sched_unlock();
     }
 
     // Adjust sleep for a more accurate period
@@ -1002,16 +996,15 @@ void sensor_Thread()
     // Read MPU6500
     short _gyro[3];
     short _accel[3];
-    unsigned long timestamp;
 
-    if (!mpu_get_accel_reg(_accel, &timestamp)) accValid = true;
+    if (!mpu_get_accel_reg(_accel, nullptr)) accValid = true;
     unsigned short ascale = 1;
     mpu_get_accel_sens(&ascale);
     tacc.x = (float)_accel[0] / (float)ascale;
     tacc.y = (float)_accel[1] / (float)ascale;
     tacc.z = (float)_accel[2] / (float)ascale;
 
-    if (!mpu_get_gyro_reg(_gyro, &timestamp)) gyrValid = true;
+    if (!mpu_get_gyro_reg(_gyro, nullptr)) gyrValid = true;
     float gscale = 1.0f;
     mpu_get_gyro_sens(&gscale);
     tgyr.x = _gyro[0] / gscale;
@@ -1088,8 +1081,8 @@ void sensor_Thread()
     if (gyrValid) {
       gyroCalibrate();
       // If double tap detection is enabled, check for it
-      if(trkset.getRstOnDbltTap())
-        detectDoubleTap();
+      // if(trkset.getRstOnDbltTap())
+      //   detectDoubleTap();
     }
 
     // Only do this update after the first mag and accel data have been read.
@@ -1172,6 +1165,7 @@ void sensor_Thread()
       if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
     }
 
+    k_sched_lock(); // don't allow uart thread to read while we are writing
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
       crsfout.PackedRCdataOut.ch0 = US_to_CRSF(channel_data[0]);
       crsfout.PackedRCdataOut.ch1 = US_to_CRSF(channel_data[1]);
@@ -1191,6 +1185,7 @@ void sensor_Thread()
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channel_data[15]);
       crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
     }
+    k_sched_unlock();
 
     // k_sched_lock(); // Not needed because of high priority of this thread
     rollout_ui_shared = rollout_ui;
@@ -1217,7 +1212,7 @@ void sensor_Thread()
     }
 
     if (sensorPeriod - senseUsDuration <
-        sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
+        sensorPeriod * 0.1) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
       k_usleep(sensorPeriod);
     } else {

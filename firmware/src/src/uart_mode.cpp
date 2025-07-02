@@ -28,7 +28,10 @@
 #include "soc_flash.h"
 #include "trackersettings.h"
 
-// s#define DEBUG_UART_RATE
+#ifdef DEBUG_UART_RATE
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(uart);
+#endif
 
 // Globals
 static uartmodet curmode = UARTDISABLE;
