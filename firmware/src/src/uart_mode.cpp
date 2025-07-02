@@ -125,14 +125,14 @@ void uartTx_Thread()
         SbusTx();
         k_usleep((1.0f / (float)trkset.getSbusTxRate()) * 1.0e6f);
         break;
-      // case UARTCRSFOUT:
-      //   k_usleep((1.0f / (float)(trkset.getCrsfTxRate() * 4)) * 1.0e6f);
-      //   crsfout.sendRCFrameToFC();
-      //   /*crsfout.AttitudeDataOut.pitch = 10;
-      //   crsfout.AttitudeDataOut.roll = 30;
-      //   crsfout.AttitudeDataOut.yaw += 1;
-      //   crsfout.sendAttitideToFC();*/
-      //   break;
+      case UARTCRSFOUT:
+        k_usleep((1.0f / (float)(trkset.getCrsfTxRate() * 4)) * 1.0e6f);
+        crsfout.sendRCFrameToFC();
+        /*crsfout.AttitudeDataOut.pitch = 10;
+        crsfout.AttitudeDataOut.roll = 30;
+        crsfout.AttitudeDataOut.yaw += 1;
+        crsfout.sendAttitideToFC();*/
+        break;
       default:
         k_msleep(1000);
         break;
@@ -226,7 +226,7 @@ void UartSetChannels(uint16_t channels[16])
       crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channels[13]);
       crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channels[14]);
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channels[15]);
-      crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
+      crsfout.LinkStatistics.rf_Mode = RATE_LORA_100HZ_8CH;
       break;
     default:
       break;

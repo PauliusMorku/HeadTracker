@@ -1126,7 +1126,7 @@ void sensor_Thread()
     // Do the AHRS calculations
     float tilt = 0, roll = 0, pan = 0;
     uint16_t tiltout_ui = 0, rollout_ui = 0, panout_ui = 0;
-    float rolloffset = 0, panoffset = 0, tiltoffset = 0;
+    static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
     if (madgreads == MADGSTART_SAMPLES) {
       // Period Between Samples
       float delttime = madgwick.deltatUpdate();
@@ -1190,8 +1190,6 @@ void sensor_Thread()
       crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channel_data[14]);
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channel_data[15]);
       crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
-
-      crsfout.sendRCFrameToFC();
     }
 
     // k_sched_lock(); // Not needed because of high priority of this thread
@@ -1215,7 +1213,7 @@ void sensor_Thread()
     // In fast CRSF mode, run sensor thread faster to minimize latency
     uint32_t sensorPeriod = SENSOR_PERIOD;
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-      sensorPeriod = (1.0f / (float)(trkset.getCrsfTxRate() * 4)) * 1.0e6f;
+      sensorPeriod = (1.0f / (float)((trkset.getCrsfTxRate()+1) * 4)) * 1.0e6f;
     }
 
     if (sensorPeriod - senseUsDuration <
