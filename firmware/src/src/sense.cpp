@@ -493,7 +493,7 @@ void calculate_Thread()
      *   6) Set auxiliary functions
      *   7) Set analog channels
      *   8) Set Reset Center pulse channel
-     *   9) Override desired channels with pan/tilt/roll
+     *   9) Override desired channels with pan/tilt/roll (now handled in sensor thread)
      *  10) Output to PPMout
      *  11) Output to Bluetooth
      *  12) Output to SBUS
@@ -682,7 +682,7 @@ void calculate_Thread()
       }
     }
 
-    // 9) Then, set Tilt/Roll/Pan Channel Values (after reset center in case of channel overlap)
+    // 9) Tilt/Roll/Pan is now set in senor thread, this section handles only TRP output enable/disable
 
     // If the long press for enable/disable isn't set or if there is no reset button configured
     //   always enable the T/R/P outputs
@@ -695,18 +695,6 @@ void calculate_Thread()
       trpOutputEnabled = false;
     }
     lastbutmode = buttonpresmode;
-
-#if 0 // Done in Sensor Thread
-    int tltch = trkset.getTltCh();
-    int rllch = trkset.getRllCh();
-    int panch = trkset.getPanCh();
-    if (tltch > 0)
-      local_channel_data[tltch - 1] = trpOutputEnabled == true ? tiltout_ui : trkset.getTlt_Cnt();
-    if (rllch > 0)
-      local_channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
-    if (panch > 0)
-      local_channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
-#endif
 
     // If uart output set to CRSF_OUT, force channel 5 (AUX1/ARM) to high, will override all other
     // channels
@@ -813,14 +801,16 @@ void calculate_Thread()
       int tlti = trkset.getTltCh()-1;
       int rlli = trkset.getRllCh()-1;
       int pani = trkset.getPanCh()-1;
+      k_mutex_unlock(&data_mutex);
+
+      k_sched_lock();
       for (int i = 0; i < 16; i++) {
         if (i == tlti || i == rlli || i == pani) {
           continue;
         }
         channel_data[i] = local_channel_data[i];
       }
-
-      k_mutex_unlock(&data_mutex);
+      k_sched_unlock();
     }
 
     // Adjust sleep for a more accurate period
@@ -1337,17 +1327,23 @@ void gyroCalibrate()
               (double)filt_gyro.z);
       gyroCalibrated = true;
       clearLEDFlag(LED_GYROCAL);
-      // Set the new Gyro Offset Values
+      
+      // Check if they differ from the flash values and save if out of range
       k_mutex_lock(&data_mutex, K_FOREVER);
+      axis_t current_off = {{0, 0, 0}};
+      current_off.x = trkset.getGyrXOff();
+      current_off.y = trkset.getGyrYOff();
+      current_off.z = trkset.getGyrZOff();
+
+      // Set the new Gyro Offset Values
       trkset.setGyrXOff(filt_gyro.x);
       trkset.setGyrYOff(filt_gyro.y);
       trkset.setGyrZOff(filt_gyro.z);
       k_mutex_unlock(&data_mutex);
 
-      // Check if they differ from the flash values and save if out of range
-      if (fabsf(trkset.getGyrXOff() - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(trkset.getGyrYOff() - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(trkset.getGyrZOff() - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
+      if (fabsf(current_off.x - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(current_off.y - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(current_off.z - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
         if (!sent_gyro_cal_msg) {
           k_sem_give(&saveToFlash_sem);
           LOG_INF("Gyro calibration differs from saved value. Updating flash, x=%.3f,y=%.3f,z=%.3f",
