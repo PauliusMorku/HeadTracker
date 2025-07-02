@@ -107,8 +107,7 @@ static axis_t rgyr = {{0, 0, 0}};
 static axis_t acc = {{0, 0, 0}};
 static axis_t mag = {{0, 0, 0}};
 static axis_t gyr = {{0, 0, 0}};
-static float tilt = 0, roll = 0, pan = 0;
-static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
+static uint16_t rollout_ui_shared = 0;
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
 
@@ -164,10 +163,9 @@ MPU6886 mpu6886;
 #define MADGINIT_MAG 0x02
 #define MADGINIT_READY (MADGINIT_ACCEL | MADGINIT_MAG)
 
-K_MUTEX_DEFINE(sensor_mutex);
-
 LOG_MODULE_REGISTER(sensors);
 
+static bool butdwn = false;
 static int madgreads = 0;
 static uint8_t madgsensbits = 0;
 static volatile bool firstrun = true;
@@ -428,52 +426,6 @@ void calculate_Thread()
       }
     }
 
-    float tiltout = 0.0f;
-    float panout = 0.0f;
-    float rollout = 0.0f;
-
-    // roll, tilt, pan float values are updated in the sensor thread
-    // Use a mutex for data safety. Wait here until the mutex is available
-    bool butdnw = false;
-
-    if(k_mutex_lock(&sensor_mutex, K_MSEC(2)) == 0) {
-      // Zero button was pressed, adjust all values to zero
-      if (wasButtonPressed()) {
-        LOG_INF("Reset Center Short Pressed");
-        rolloffset = roll;
-        panoffset = pan;
-        tiltoffset = tilt;
-        butdnw = true;
-      }
-
-      // Tilt output
-      tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
-
-      // Roll output
-      rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
-
-      // Pan output, Normalize to +/- 180 Degrees
-      panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() *
-                    (trkset.isPanReversed() ? -1.0f : 1.0f);
-      k_mutex_unlock(&sensor_mutex);
-    } else {
-      LOG_ERR("Sensor Mutex Lock Failed");
-    }
-
-  uint16_t tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
-  uint16_t rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
-  uint16_t panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
-
-    // If button was pressed and this is a remote bluetooth boart send the button press back
-    static bool btbtnupdated = false;
-    if (BTGetMode() == BTPARARMT) {
-      if (butdnw && btbtnupdated == false) {
-        BTRmtSendButtonPress(false);  // Send the short press over bluetooth to remote board
-        btbtnupdated = true;
-      } else if (btbtnupdated == true) {
-        btbtnupdated = false;
-      }
-    }
 
     // Reset on tilt
     static bool doresetontilt = false;
@@ -486,7 +438,7 @@ void calculate_Thread()
         HITMAX,
       };
       static int minmax = HITNONE;
-      if (rollout_ui == trkset.getRll_Max()) {
+      if (rollout_ui_shared == trkset.getRll_Max()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMAX;
@@ -496,7 +448,7 @@ void calculate_Thread()
           doresetontilt = true;
         }
 
-      } else if (rollout_ui == trkset.getRll_Min()) {
+      } else if (rollout_ui_shared == trkset.getRll_Min()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMIN;
@@ -690,15 +642,36 @@ void calculate_Thread()
 #endif
 
     // 8) First decide if 'reset center' pulse should be sent
+    bool initiatereset;
+    k_sched_lock();
+    if (butdwn) {
+      butdwn = false;
+      initiatereset = true;
+    } else {
+      initiatereset = false;
+    }
+    k_sched_unlock();
+
+    // If button was pressed and this is a remote bluetooth boart send the button press back
+    static bool btbtnupdated = false;
+    if (BTGetMode() == BTPARARMT) {
+      if (initiatereset && btbtnupdated == false) {
+        BTRmtSendButtonPress(false);  // Send the short press over bluetooth to remote board
+        btbtnupdated = true;
+      } else if (btbtnupdated == true) {
+        btbtnupdated = false;
+      }
+    }
+
     static float pulsetimer = 0;
     static bool sendingresetpulse = false;
     int alertch = trkset.getAlertCh();
     if (alertch > 0) {
       // Synthesize a pulse indicating reset center started
       local_channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
-      if (butdnw) {
+      if (initiatereset) {
         sendingresetpulse = true;
-        pulsetimer = 0;
+        pulsetimer = 0.0f;
       }
       if (sendingresetpulse) {
         local_channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
@@ -820,21 +793,6 @@ void calculate_Thread()
       trkset.setDataOff_MagX(mag.x);
       trkset.setDataOff_MagY(mag.y);
       trkset.setDataOff_MagZ(mag.z);
-
-      if(k_mutex_lock(&sensor_mutex, K_NO_WAIT) == 0) { // Ignore if locked
-        trkset.setDataTilt(tilt);
-        trkset.setDataRoll(roll);
-        trkset.setDataPan(pan);
-        k_mutex_unlock(&sensor_mutex);
-      }
-
-      trkset.setDataTiltOff(tilt - tiltoffset);
-      trkset.setDataRollOff(roll - rolloffset);
-      trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
-
-      trkset.setDataTiltOut(tiltout_ui);
-      trkset.setDataRollOut(rollout_ui);
-      trkset.setDataPanOut(panout_ui);
 
       // PPM Input Values
       trkset.setDataPpmCh(ppm_in_chans);
@@ -1079,8 +1037,6 @@ void sensor_Thread()
     }
 #endif
 
-    k_mutex_lock(&sensor_mutex, K_FOREVER);
-
     // -- Accelerometer
     if (accValid) {
       racc = tacc;
@@ -1178,6 +1134,9 @@ void sensor_Thread()
     }
 
     // Do the AHRS calculations
+    float tilt = 0, roll = 0, pan = 0;
+    uint16_t tiltout_ui = 0, rollout_ui = 0, panout_ui = 0;
+    float rolloffset = 0, panoffset = 0, tiltoffset = 0;
     if (madgreads == MADGSTART_SAMPLES) {
       // Period Between Samples
       float delttime = madgwick.deltatUpdate();
@@ -1194,6 +1153,14 @@ void sensor_Thread()
       }
     }
 
+    if (wasButtonPressed()) {
+      LOG_INF("Reset Center Short Pressed");
+      rolloffset = roll;
+      panoffset = pan;
+      tiltoffset = tilt;
+      butdwn = true;
+    }
+
     // Fast CRSF mode - send CRSF directly from sensor thread for minimum latency
     // Calculate outputs
     float tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
@@ -1201,21 +1168,19 @@ void sensor_Thread()
     float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
 
     // Convert to channel values
-    uint16_t tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
-    uint16_t rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
-    uint16_t panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
+    tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
+    rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
+    panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
 
     // Set head tracking channels
     if (trpOutputEnabled) {
-      int tltch = trkset.getTltCh();
-      int rllch = trkset.getRllCh();
-      int panch = trkset.getPanCh();
+      int8_t tltch = trkset.getTltCh();
+      int8_t rllch = trkset.getRllCh();
+      int8_t panch = trkset.getPanCh();
       if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = tiltout_ui;
       if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = rollout_ui;
       if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
     }
-
-    k_mutex_unlock(&sensor_mutex); //TODO should be removed
 
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
       crsfout.PackedRCdataOut.ch0 = US_to_CRSF(channel_data[0]);
@@ -1238,6 +1203,21 @@ void sensor_Thread()
 
       crsfout.sendRCFrameToFC();
     }
+
+    // k_sched_lock(); // Not needed because of high priority of this thread
+    rollout_ui_shared = rollout_ui;
+    trkset.setDataTilt(tilt);
+    trkset.setDataRoll(roll);
+    trkset.setDataPan(pan);
+
+    trkset.setDataTiltOff(tilt - tiltoffset);
+    trkset.setDataRollOff(roll - rolloffset);
+    trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
+
+    trkset.setDataTiltOut(tiltout_ui);
+    trkset.setDataRollOut(rollout_ui);
+    trkset.setDataPanOut(panout_ui);
+    // k_sched_unlock();
 
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
