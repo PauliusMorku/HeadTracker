@@ -18,12 +18,13 @@
 #define HAS_PPMOUT
 #define HAS_PPMIN
 #define HAS_3CH_ANALOG
-#define HAS_VOLTMON
+// #define HAS_VOLTMON
 
-#define AN0 5 // Pin 0.29
-#define AN1 0 // Pin 0.02
-#define AN2 4 // Pin 0.28
-#define ANVOLTMON 1 // Battery Voltage
+#define AN0 1 // Battery Voltage
+#define AN1 5 // Pin 0.29
+#define AN2 0 // Pin 0.02
+#define AN3 4 // Pin 0.28
+// #define ANVOLTMON 1 // Battery Voltage
 #define ANVOLTMON_SCALE 2.0f
 #define ANVOLTMON_OFFSET 0.0f
 
@@ -45,10 +46,10 @@
 
 #define PIN_X \
   PIN(CENTER_BTN,   NRFPIN(1, 13), "") \
-  PIN(VOLTMON,      NRFPIN(0,  3), "") \
-  PIN(AN0,          NRFPIN(0, 29), "Analog 0 (AIN_5)") \
-  PIN(AN1,          NRFPIN(0,  2), "Analog 1 (AIN_0)") \
-  PIN(AN2,          NRFPIN(0, 28), "Analog 2 (AIN_4)") \
+  PIN(AN0,          NRFPIN(0,  3), "Analog Battery Voltage") \
+  PIN(AN1,          NRFPIN(0, 29), "Analog 1 (AIN_5)") \
+  PIN(AN2,          NRFPIN(0,  2), "Analog 2 (AIN_0)") \
+  PIN(AN3,          NRFPIN(0, 28), "Analog 3 (AIN_4)") \
   PIN(LEDWS,        NRFPIN(1, 10), "") \
   PIN(LED,          NRFPIN(0, 13), "") \
   PIN(PPMOUT,       NRFPIN(0, 31), "") \
