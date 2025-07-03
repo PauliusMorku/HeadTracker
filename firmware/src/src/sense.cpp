@@ -1026,13 +1026,9 @@ void sensor_Thread()
     if (accValid) {
       racc = tacc;
 
-      accoff.x = trkset.getAccXOff();
-      accoff.y = trkset.getAccYOff();
-      accoff.z = trkset.getAccZOff();
-
-      acc.x = racc.x - accoff.x;
-      acc.y = racc.y - accoff.y;
-      acc.z = racc.z - accoff.z;
+      acc.x = racc.x - trkset.getAccXOff();
+      acc.y = racc.y - trkset.getAccYOff();
+      acc.z = racc.z - trkset.getAccZOff();
 
       // Apply Rotation
       rotate(acc.data, rotation);
@@ -1045,13 +1041,9 @@ void sensor_Thread()
     if (gyrValid) {
       rgyr = tgyr;
 
-      gyroff.x = trkset.getGyrXOff();
-      gyroff.y = trkset.getGyrYOff();
-      gyroff.z = trkset.getGyrZOff();
-
-      gyr.x = rgyr.x - gyroff.x;
-      gyr.y = rgyr.y - gyroff.y;
-      gyr.z = rgyr.z - gyroff.z;
+      gyr.x = rgyr.x - trkset.getGyrXOff();
+      gyr.y = rgyr.y - trkset.getGyrYOff();
+      gyr.z = rgyr.z - trkset.getGyrZOff();
 
       // Apply Rotation
       rotate(gyr.data, rotation);
