@@ -1137,7 +1137,11 @@ void sensor_Thread()
     if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
     if (panch > 0 && panch <= 16) channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
 
+    uint32_t sensorPeriod = SENSOR_PERIOD;
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
+      uint32_t crsfRate = ((trkset.getCrsfTxRate()+1) * 2);
+      sensorPeriod = (1.0f / (float)crsfRate) * 1.0e6f;
+
       k_sched_lock(); // don't allow uart thread to read while we are writing
       UartSetChannels(channel_data);
       k_sched_unlock();
@@ -1160,12 +1164,12 @@ void sensor_Thread()
 
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
-    if (SENSOR_PERIOD - senseUsDuration <
-        SENSOR_PERIOD * 0.4) {  // Took a long time. Will crash if sleep is too short
+    if (sensorPeriod - senseUsDuration <
+        sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
-      k_usleep(SENSOR_PERIOD);
+      k_usleep(sensorPeriod);
     } else {
-      k_usleep(SENSOR_PERIOD - senseUsDuration);
+      k_usleep(sensorPeriod - senseUsDuration);
     }
 
 #if defined(DEBUG_SENSOR_RATES)
