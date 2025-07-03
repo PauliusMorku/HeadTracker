@@ -1023,23 +1023,14 @@ void sensor_Thread()
 
     // -- Accelerometer
     if (accValid) {
-      racc.x = tacc.x;
-      racc.y = tacc.y;
-      racc.z = tacc.z;
-      accoff.x = trkset.getAccXOff();
-      accoff.y = trkset.getAccYOff();
-      accoff.z = trkset.getAccZOff();
+      racc = tacc;
 
-      acc.x = racc.x - accoff.x;
-      acc.y = racc.y - accoff.y;
-      acc.z = racc.z - accoff.z;
+      acc.x = racc.x - trkset.getAccXOff();
+      acc.y = racc.y - trkset.getAccYOff();
+      acc.z = racc.z - trkset.getAccZOff();
 
       // Apply Rotation
-      axis_t tmpacc = {acc.x, acc.y, acc.z};
-      rotate(tmpacc.data, rotation);
-      acc.x = tmpacc.x;
-      acc.y = tmpacc.y;
-      acc.z = tmpacc.z;
+      rotate(acc.data, rotation);
 
       // For intial orientation setup
       madgsensbits |= MADGINIT_ACCEL;
@@ -1047,30 +1038,21 @@ void sensor_Thread()
 
     // --- Gyrometer Calcs
     if (gyrValid) {
-      rgyr.x = tgyr.x;
-      rgyr.y = tgyr.y;
-      rgyr.z = tgyr.z;
-      gyroff.x = trkset.getGyrXOff();
-      gyroff.y = trkset.getGyrYOff();
-      gyroff.z = trkset.getGyrZOff();
+      rgyr = tgyr;
 
-      gyr.x = rgyr.x - gyroff.x;
-      gyr.y = rgyr.y - gyroff.y;
-      gyr.z = rgyr.z - gyroff.z;
+      gyr.x = rgyr.x - trkset.getGyrXOff();
+      gyr.y = rgyr.y - trkset.getGyrYOff();
+      gyr.z = rgyr.z - trkset.getGyrZOff();
 
       // Apply Rotation
-      axis_t tmpgyr = {gyr.x, gyr.y, gyr.z};
-      rotate(tmpgyr.data, rotation);
-      gyr.x = tmpgyr.x;
-      gyr.y = tmpgyr.y;
-      gyr.z = tmpgyr.z;
+      rotate(gyr.data, rotation);
     }
 
     if (!trkset.getDisMag()) {
       if (magValid) {
         // --- Magnetometer Calcs
-        rmag.x = tmag.x;
-        rmag.y = tmag.y;
+        rmag = tmag;
+
         rmag.z = tmag.z;
         float magsioff[9];
         magoff.x = trkset.getMagXOff();
@@ -1088,19 +1070,13 @@ void sensor_Thread()
         mag.z = (mag.x * magsioff[6]) + (mag.y * magsioff[7]) + (mag.z * magsioff[8]);
 
         // Apply Rotation
-        axis_t tmpmag = {mag.x, mag.y, mag.z};
-        rotate(tmpmag.data, rotation);
-        mag.x = tmpmag.x;
-        mag.y = tmpmag.y;
-        mag.z = tmpmag.z;
+        rotate(mag.data, rotation);
 
         // For inital orientation setup
         madgsensbits |= MADGINIT_MAG;
       }
     } else {
-      mag.x = 0;
-      mag.y = 0;
-      mag.z = 0;
+      mag = (axis_t){{0, 0, 0}};
       madgsensbits |= MADGINIT_MAG;
     }
 
