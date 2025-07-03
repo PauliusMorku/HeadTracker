@@ -17,6 +17,7 @@
 
 #include "sense.h"
 
+#include <float.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
@@ -64,6 +65,8 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
+#define CRSF_ACTUAL_RATE_CHANNEL 16
+
 // #define DEBUG_SENSOR_RATES
 
 typedef union {
@@ -75,6 +78,7 @@ typedef union {
 
 void gyroCalibrate();
 void detectDoubleTap();
+
 
 inline float magnitude(const axis_t& v) {
   return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -96,6 +100,7 @@ static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
 static axis_t magoff = {{0, 0, 0}};
 static axis_t accoff = {{0, 0, 0}};
 static axis_t gyroff = {{0, 0, 0}};
+static uint16_t rollout_ui_shared = 0;
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
 
@@ -151,10 +156,9 @@ MPU6886 mpu6886;
 #define MADGINIT_MAG 0x02
 #define MADGINIT_READY (MADGINIT_ACCEL | MADGINIT_MAG)
 
-K_MUTEX_DEFINE(sensor_mutex);
-
 LOG_MODULE_REGISTER(sensors);
 
+static bool butdwn = false;
 static int madgreads = 0;
 static uint8_t madgsensbits = 0;
 static volatile bool firstrun = true;
@@ -414,55 +418,6 @@ void calculate_Thread()
       }
     }
 
-    float tiltout = 0.0f;
-    float panout = 0.0f;
-    float rollout = 0.0f;
-
-    // roll, tilt, pan float values are updated in the sensor thread
-    // Use a mutex for data safety. Wait here until the mutex is available
-    bool butdnw = false;
-
-    if(k_mutex_lock(&sensor_mutex, K_MSEC(2)) == 0) {
-      // Zero button was pressed, adjust all values to zero
-      if (wasButtonPressed()) {
-        LOG_INF("Reset Center Short Pressed");
-        rolloffset = roll;
-        panoffset = pan;
-        tiltoffset = tilt;
-        butdnw = true;
-      }
-
-      // Tilt output
-      tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
-
-      // Roll output
-      rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
-
-      // Pan output, Normalize to +/- 180 Degrees
-      panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() *
-                    (trkset.isPanReversed() ? -1.0f : 1.0f);
-      k_mutex_unlock(&sensor_mutex);
-    } else {
-      LOG_ERR("Sensor Mutex Lock Failed");
-    }
-
-    uint16_t tiltout_ui = tiltout + trkset.getTlt_Cnt();  // Apply Center Offset
-    tiltout_ui = MAX(MIN(tiltout_ui, trkset.getTlt_Max()), trkset.getTlt_Min());  // Limit Output
-    uint16_t rollout_ui = rollout + trkset.getRll_Cnt();  // Apply Center Offset
-    rollout_ui = MAX(MIN(rollout_ui, trkset.getRll_Max()), trkset.getRll_Min());  // Limit Output
-    uint16_t panout_ui = panout + trkset.getPan_Cnt();  // Apply Center Offset
-    panout_ui = MAX(MIN(panout_ui, trkset.getPan_Max()), trkset.getPan_Min());  // Limit Output
-
-    // If button was pressed and this is a remote bluetooth boart send the button press back
-    static bool btbtnupdated = false;
-    if (BTGetMode() == BTPARARMT) {
-      if (butdnw && btbtnupdated == false) {
-        BTRmtSendButtonPress(false);  // Send the short press over bluetooth to remote board
-        btbtnupdated = true;
-      } else if (btbtnupdated == true) {
-        btbtnupdated = false;
-      }
-    }
 
     // Reset on tilt
     static bool doresetontilt = false;
@@ -475,7 +430,7 @@ void calculate_Thread()
         HITMAX,
       };
       static int minmax = HITNONE;
-      if (rollout_ui == trkset.getRll_Max()) {
+      if (rollout_ui_shared == trkset.getRll_Max()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMAX;
@@ -485,7 +440,7 @@ void calculate_Thread()
           doresetontilt = true;
         }
 
-      } else if (rollout_ui == trkset.getRll_Min()) {
+      } else if (rollout_ui_shared == trkset.getRll_Min()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMIN;
@@ -530,7 +485,7 @@ void calculate_Thread()
      *   6) Set auxiliary functions
      *   7) Set analog channels
      *   8) Set Reset Center pulse channel
-     *   9) Override desired channels with pan/tilt/roll
+     *   9) Override desired channels with pan/tilt/roll (now handled in sensor thread)
      *  10) Output to PPMout
      *  11) Output to Bluetooth
      *  12) Output to SBUS
@@ -543,7 +498,8 @@ void calculate_Thread()
      */
 
     // 1) Reset all Channels to zero which means they have no data
-    for (int i = 0; i < 16; i++) channel_data[i] = 0;
+    static uint16_t local_channel_data[16];
+    for (int i = 0; i < 16; i++) local_channel_data[i] = 0;
 
     // 2) Read all PPM inputs
     PpmIn_execute();
@@ -552,7 +508,7 @@ void calculate_Thread()
     int ppm_in_chcnt = PpmIn_getChannels(ppm_in_chans);
     if (ppm_in_chcnt >= 4 && ppm_in_chcnt <= 16) {
       for (int i = 0; i < MIN(ppm_in_chcnt, 16); i++) {
-        channel_data[i] = ppm_in_chans[i];
+        local_channel_data[i] = ppm_in_chans[i];
       }
     }
 
@@ -569,7 +525,7 @@ void calculate_Thread()
       // SBUS data still valid, set the channel values to the last SBUS
     } else {
       for (int i = 0; i < 16; i++) {
-        channel_data[i] = uart_in_chans[i];
+        local_channel_data[i] = uart_in_chans[i];
       }
       if (!recmsgsent) {
         LOG_DBG("Uart(SBUS/CRSF) Data Received");
@@ -591,7 +547,7 @@ void calculate_Thread()
       uint16_t btvalue = BTGetChannel(i);
       if (btvalue > 0) {
         bt_chans[i] = btvalue;
-        channel_data[i] = btvalue;
+        local_channel_data[i] = btvalue;
       }
     }
 
@@ -600,11 +556,11 @@ void calculate_Thread()
     /*int rstppmch = trkset.resetCntPPM() - 1;
     static bool hasrstppm=false;
     if(rstppmch >= 0 && rstppmch < 16) {
-        if(channel_data[rstppmch] > 1800 && hasrstppm == false) {
+        if(local_channel_data[rstppmch] > 1800 && hasrstppm == false) {
             LOG_INF("Reset Center - Input Channel %d > 1800us", rstppmch+1);
             pressButton();
             hasrstppm = true;
-        } else if (channel_data[rstppmch] < 1700 && hasrstppm == true) {
+        } else if (local_channel_data[rstppmch] < 1700 && hasrstppm == true) {
             hasrstppm = false;
         }
     }*/ //REMOVED as of V2.1
@@ -615,9 +571,9 @@ void calculate_Thread()
     int aux2ch = trkset.getAux2Ch();
     if (aux0ch > 0 || aux1ch > 0 || aux2ch > 0) {
       buildAuxData();
-      if (aux0ch > 0) channel_data[aux0ch - 1] = auxdata[trkset.getAux0Func()];
-      if (aux1ch > 0) channel_data[aux1ch - 1] = auxdata[trkset.getAux1Func()];
-      if (aux2ch > 0) channel_data[aux2ch - 1] = auxdata[trkset.getAux2Func()];
+      if (aux0ch > 0) local_channel_data[aux0ch - 1] = auxdata[trkset.getAux0Func()];
+      if (aux1ch > 0) local_channel_data[aux1ch - 1] = auxdata[trkset.getAux1Func()];
+      if (aux2ch > 0) local_channel_data[aux2ch - 1] = auxdata[trkset.getAux2Func()];
     }
 
     // 7) Set Analog Channels
@@ -635,7 +591,7 @@ void calculate_Thread()
       an4 += trkset.getAn0Off();
       an4 += TrackerSettings::MIN_PWM;
       an4 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an4));
-      channel_data[trkset.getAn0Ch() - 1] = an4;
+      local_channel_data[trkset.getAn0Ch() - 1] = an4;
     }
 #endif
 #ifdef AN1
@@ -645,7 +601,7 @@ void calculate_Thread()
       an5 += trkset.getAn1Off();
       an5 += TrackerSettings::MIN_PWM;
       an5 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an5));
-      channel_data[trkset.getAn1Ch() - 1] = an5;
+      local_channel_data[trkset.getAn1Ch() - 1] = an5;
     }
 #endif
 #ifdef AN2
@@ -655,7 +611,7 @@ void calculate_Thread()
       an6 += trkset.getAn2Off();
       an6 += TrackerSettings::MIN_PWM;
       an6 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an6));
-      channel_data[trkset.getAn2Ch() - 1] = an6;
+      local_channel_data[trkset.getAn2Ch() - 1] = an6;
     }
 #endif
 #ifdef AN3
@@ -665,23 +621,44 @@ void calculate_Thread()
       an7 += trkset.getAn3Off();
       an7 += TrackerSettings::MIN_PWM;
       an7 = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, an7));
-      channel_data[trkset.getAn3Ch() - 1] = an7;
+      local_channel_data[trkset.getAn3Ch() - 1] = an7;
     }
 #endif
 
     // 8) First decide if 'reset center' pulse should be sent
+    bool initiatereset;
+    k_sched_lock();
+    if (butdwn) {
+      butdwn = false;
+      initiatereset = true;
+    } else {
+      initiatereset = false;
+    }
+    k_sched_unlock();
+
+    // If button was pressed and this is a remote bluetooth boart send the button press back
+    static bool btbtnupdated = false;
+    if (BTGetMode() == BTPARARMT) {
+      if (initiatereset && btbtnupdated == false) {
+        BTRmtSendButtonPress(false);  // Send the short press over bluetooth to remote board
+        btbtnupdated = true;
+      } else if (btbtnupdated == true) {
+        btbtnupdated = false;
+      }
+    }
+
     static float pulsetimer = 0;
     static bool sendingresetpulse = false;
     int alertch = trkset.getAlertCh();
     if (alertch > 0) {
       // Synthesize a pulse indicating reset center started
-      channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
-      if (butdnw) {
+      local_channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
+      if (initiatereset) {
         sendingresetpulse = true;
-        pulsetimer = 0;
+        pulsetimer = 0.0f;
       }
       if (sendingresetpulse) {
-        channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
+        local_channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
         pulsetimer += (float)CALCULATE_PERIOD / 1000000.0f;
         if (pulsetimer > TrackerSettings::RECENTER_PULSE_DURATION) {
           sendingresetpulse = false;
@@ -689,7 +666,7 @@ void calculate_Thread()
       }
     }
 
-    // 9) Then, set Tilt/Roll/Pan Channel Values (after reset center in case of channel overlap)
+    // 9) Tilt/Roll/Pan is now set in senor thread, this section handles only TRP output enable/disable
 
     // If the long press for enable/disable isn't set or if there is no reset button configured
     //   always enable the T/R/P outputs
@@ -703,26 +680,16 @@ void calculate_Thread()
     }
     lastbutmode = buttonpresmode;
 
-    int tltch = trkset.getTltCh();
-    int rllch = trkset.getRllCh();
-    int panch = trkset.getPanCh();
-    if (tltch > 0)
-      channel_data[tltch - 1] = trpOutputEnabled == true ? tiltout_ui : trkset.getTlt_Cnt();
-    if (rllch > 0)
-      channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
-    if (panch > 0)
-      channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
-
     // If uart output set to CRSF_OUT, force channel 5 (AUX1/ARM) to high, will override all other
     // channels
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-      if (trkset.getCh5Arm()) channel_data[4] = 2000;
+      if (trkset.getCh5Arm()) local_channel_data[4] = 2000;
     }
 
     // 10) Set the PPM Outputs
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
-      uint16_t ppmout = channel_data[i];
+      uint16_t ppmout = local_channel_data[i];
       if (ppmout == 0) ppmout = TrackerSettings::PPM_CENTER;
       PpmOut_setChannel(i, ppmout);
     }
@@ -731,25 +698,41 @@ void calculate_Thread()
     bool bleconnected = BTGetConnected();
     trkset.setDataBtAddr(BTGetAddress());
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
-      BTSetChannel(i, channel_data[i]);
+      BTSetChannel(i, local_channel_data[i]);
     }
 
     // 12) Set all UART output channels, if disabled(0) set to center
-    uint16_t uart_data[16];
     for (int i = 0; i < 16; i++) {
-      if (channel_data[i] == 0)
-        uart_data[i] = TrackerSettings::PPM_CENTER;
-      else
-        uart_data[i] = channel_data[i];
+      if (local_channel_data[i] == 0) {
+        local_channel_data[i] = TrackerSettings::PPM_CENTER;
+      }
     }
-    UartSetChannels(uart_data);
+
+    int tlti = trkset.getTltCh()-1;
+    int rlli = trkset.getRllCh()-1;
+    int pani = trkset.getPanCh()-1;
+
+    k_sched_lock();
+    local_channel_data[tlti] = channel_data[tlti];
+    local_channel_data[rlli] = channel_data[rlli];
+    local_channel_data[pani] = channel_data[pani];
+    local_channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
+
+    for (int i = 0; i < 16; i++) {
+      if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
+        continue;
+      } else {
+        channel_data[i] = local_channel_data[i];
+      }
+    }
+    k_sched_unlock();
 
     // 13) Set PWM Channels
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
       if (pwmch >= 0 && pwmch < 16) {
-        uint16_t pwmout = channel_data[pwmch];
+        uint16_t pwmout = local_channel_data[pwmch];
         if (pwmout == 0) pwmout = TrackerSettings::PPM_CENTER;
         setPWMValue(i, pwmout);
       }
@@ -759,7 +742,7 @@ void calculate_Thread()
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
-      set_JoystickChannels(channel_data);
+      set_JoystickChannels(local_channel_data);
     }
 
     // Update the settings for the GUI
@@ -795,7 +778,7 @@ void calculate_Thread()
       trkset.setDataPpmCh(ppm_in_chans);
       trkset.setDataBtCh(bt_chans);
       trkset.setDataUartCh(uart_in_chans);
-      trkset.setDataChOut(channel_data);
+      trkset.setDataChOut(local_channel_data);
 
       trkset.setDataTrpEnabled(trpOutputEnabled);
       trkset.setDataGyroCal(gyroCalibrated);
@@ -998,15 +981,13 @@ void sensor_Thread()
     // Read MPU6500
     short _gyro[3];
     short _accel[3];
-    unsigned long timestamp;
-    if (!mpu_get_accel_reg(_accel, &timestamp)) accValid = true;
+    if (!mpu_get_accel_reg(_accel, nullptr)) accValid = true;
     unsigned short ascale = 1;
-    ;
     mpu_get_accel_sens(&ascale);
     tacc.x = (float)_accel[0] / (float)ascale;
     tacc.y = (float)_accel[1] / (float)ascale;
     tacc.z = (float)_accel[2] / (float)ascale;
-    if (!mpu_get_gyro_reg(_gyro, &timestamp)) gyrValid = true;
+    if (!mpu_get_gyro_reg(_gyro, nullptr)) gyrValid = true;
     float gscale = 1.0f;
     mpu_get_gyro_sens(&gscale);
     tgyr.x = _gyro[0] / gscale;
@@ -1109,8 +1090,8 @@ void sensor_Thread()
     if (gyrValid) {
       gyroCalibrate();
       // If double tap detection is enabled, check for it
-      if(trkset.getRstOnDbltTap())
-        detectDoubleTap();
+      // if(trkset.getRstOnDbltTap())
+      //   detectDoubleTap();
     }
 
     // Only do this update after the first mag and accel data have been read.
@@ -1127,18 +1108,13 @@ void sensor_Thread()
       if (madgsensbits == MADGINIT_READY) {
         madgsensbits = 0;
         madgreads++;
-        aacc.x += acc.x;
-        aacc.y += acc.y;
-        aacc.z += acc.z;
-        aacc.x /= 2;
-        aacc.y /= 2;
-        aacc.z /= 2;
-        amag.x += mag.x;
-        amag.y += mag.y;
-        amag.z += mag.z;
-        amag.x /= 2;
-        amag.y /= 2;
-        amag.z /= 2;
+        float inv_count = 1.0f / madgreads;
+        aacc.x += (acc.x - aacc.x) * inv_count;
+        aacc.y += (acc.y - aacc.y) * inv_count;
+        aacc.z += (acc.z - aacc.z) * inv_count;
+        amag.x += (mag.x - amag.x) * inv_count;
+        amag.y += (mag.y - amag.y) * inv_count;
+        amag.z += (mag.z - amag.z) * inv_count;
       }
 
       // Got the averaged values, apply the initial orientation.
@@ -1150,6 +1126,9 @@ void sensor_Thread()
     }
 
     // Do the AHRS calculations
+    float tilt = 0, roll = 0, pan = 0;
+    uint16_t tiltout_ui = 0, rollout_ui = 0, panout_ui = 0;
+    static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
     if (madgreads == MADGSTART_SAMPLES) {
       // Period Between Samples
       float delttime = madgwick.deltatUpdate();
@@ -1166,28 +1145,80 @@ void sensor_Thread()
       }
     }
 
-    k_mutex_unlock(&sensor_mutex);
+    if (wasButtonPressed()) {
+      LOG_INF("Reset Center Short Pressed");
+      rolloffset = roll;
+      panoffset = pan;
+      tiltoffset = tilt;
+      butdwn = true;
+    }
+
+    // Fast CRSF mode - send CRSF directly from sensor thread for minimum latency
+    // Calculate outputs
+    float tiltout = (tilt - tiltoffset) * trkset.getTlt_Gain() * (trkset.isTiltReversed() ? -1.0f : 1.0f);
+    float rollout = (roll - rolloffset) * trkset.getRll_Gain() * (trkset.isRollReversed() ? -1.0f : 1.0f);
+    float panout = normalize((pan - panoffset), -180, 180) * trkset.getPan_Gain() * (trkset.isPanReversed() ? -1.0f : 1.0f);
+
+    // Convert to channel values
+    tiltout_ui = clamp_channel(tiltout + trkset.getTlt_Cnt(), trkset.getTlt_Min(), trkset.getTlt_Max());
+    rollout_ui = clamp_channel(rollout + trkset.getRll_Cnt(), trkset.getRll_Min(), trkset.getRll_Max());
+    panout_ui = clamp_channel(panout + trkset.getPan_Cnt(), trkset.getPan_Min(), trkset.getPan_Max());
+
+    // Set head tracking channels
+    int8_t tltch = trkset.getTltCh();
+    int8_t rllch = trkset.getRllCh();
+    int8_t panch = trkset.getPanCh();
+    if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = trpOutputEnabled == true ? tiltout_ui : trkset.getTlt_Cnt();
+    if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
+    if (panch > 0 && panch <= 16) channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
+
+    static uint32_t crsfActualRate = 0;
+    channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = crsfActualRate + 1000;
+
+    uint32_t sensorPeriod = SENSOR_PERIOD;
+
+    if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
+      uint32_t crsfRate = ((trkset.getCrsfTxRate()+1) * 2);
+      sensorPeriod = (1.0f / (float)crsfRate) * 1.0e6f;
+
+      k_sched_lock(); // don't allow uart thread to read while we are writing
+      UartSetChannels(channel_data);
+      k_sched_unlock();
+    }
+
+    // k_sched_lock(); // Not needed because of high priority of this thread
+    rollout_ui_shared = rollout_ui;
+    trkset.setDataTilt(tilt);
+    trkset.setDataRoll(roll);
+    trkset.setDataPan(pan);
+
+    trkset.setDataTiltOff(tilt - tiltoffset);
+    trkset.setDataRollOff(roll - rolloffset);
+    trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
+
+    trkset.setDataTiltOut(tiltout_ui);
+    trkset.setDataRollOut(rollout_ui);
+    trkset.setDataPanOut(panout_ui);
+    // k_sched_unlock();
 
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
-    if (SENSOR_PERIOD - senseUsDuration <
-        SENSOR_PERIOD * 0.4) {  // Took a long time. Will crash if sleep is too short
+    if (sensorPeriod - senseUsDuration <
+        sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
-      k_usleep(SENSOR_PERIOD);
+      k_usleep(sensorPeriod);
     } else {
-      k_usleep(SENSOR_PERIOD - senseUsDuration);
+      k_usleep(sensorPeriod - senseUsDuration);
     }
 
-#if defined(DEBUG_SENSOR_RATES)
     static int mcount = 0;
     static int64_t mmic = millis64() + 1000;
     if (mmic < millis64()) {  // Every Second
       mmic = millis64() + 1000;
-      LOG_INF("Sense Rate = %d", mcount);
+      crsfActualRate = mcount;
       mcount = 0;
     }
     if (accValid) mcount++;
-#endif
   }  // END THREAD
 }
 
@@ -1297,6 +1328,91 @@ void gyroCalibrate()
   // printk("%.4f,%.2f,%.2f\n", (float)time / 1000000.0f, gyro_dif, acc_dif);
 }
 
+// void gyroCalibrate()
+// {
+//   static float last_gyro_mag = 0;
+//   static float last_acc_mag = 0;
+//   static axis_t filt_gyro = {{0, 0, 0}};
+//   static bool sent_gyro_cal_msg = false;
+//   static uint32_t filter_samples = 0;
+//   static uint64_t lasttime = 0;
+
+//   if(gyroCalibrated)
+//     return;
+
+//   uint64_t time = micros64();
+//   if (lasttime == 0) {  // Skip first run
+//     lasttime = time;
+//     return;
+//   }
+//   float deltatime = (float)(time - lasttime) / 1000000.0f;
+//   if (deltatime == 0.0f) return;
+//   lasttime = time;
+
+//   float gyro_magnitude = magnitude(rgyr);
+//   float acc_magnitude = magnitude(racc);
+//   float gyro_dif = (gyro_magnitude - last_gyro_mag) / deltatime;
+//   last_gyro_mag = gyro_magnitude;
+//   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
+//   last_acc_mag = acc_magnitude;
+
+//   // Is Gyro anc Accelerometer stable?
+//   if (fabsf(gyro_dif) < GYRO_STABLE_DIFF && fabsf(acc_dif) < ACC_STABLE_DIFF) {
+//     // First run, preload filter
+//     if (filter_samples == 0) {
+//       filt_gyro.x = rgyr.x;
+//       filt_gyro.y = rgyr.y;
+//       filt_gyro.z = rgyr.z;
+//       sent_gyro_cal_msg = false;
+//       filter_samples++;
+//     } else if (filter_samples < GYRO_STABLE_SAMPLES) {
+//       // Pre-calculate constants to avoid repeated computation
+//       static const float GYRO_FILTER_COEFF_OLD = 1.0f - GYRO_SAMPLE_WEIGHT;
+//       static const float GYRO_FILTER_COEFF_NEW = GYRO_SAMPLE_WEIGHT;
+      
+//       filt_gyro.x = (GYRO_FILTER_COEFF_OLD * filt_gyro.x) + (GYRO_FILTER_COEFF_NEW * rgyr.x);
+//       filt_gyro.y = (GYRO_FILTER_COEFF_OLD * filt_gyro.y) + (GYRO_FILTER_COEFF_NEW * rgyr.y);
+//       filt_gyro.z = (GYRO_FILTER_COEFF_OLD * filt_gyro.z) + (GYRO_FILTER_COEFF_NEW * rgyr.z);
+//       filter_samples++;
+//     } else if (filter_samples == GYRO_STABLE_SAMPLES) {
+//       LOG_INF("Gyro Calibrated, x=%.3f,y=%.3f,z=%.3f", (double)filt_gyro.x, (double)filt_gyro.y,
+//               (double)filt_gyro.z);
+//       gyroCalibrated = true;
+//       clearLEDFlag(LED_GYROCAL);
+      
+//       // Check if they differ from the flash values and save if out of range
+//       k_mutex_lock(&data_mutex, K_FOREVER);
+//       axis_t current_off = {{0, 0, 0}};
+//       current_off.x = trkset.getGyrXOff();
+//       current_off.y = trkset.getGyrYOff();
+//       current_off.z = trkset.getGyrZOff();
+
+//       // Set the new Gyro Offset Values
+//       trkset.setGyrXOff(filt_gyro.x);
+//       trkset.setGyrYOff(filt_gyro.y);
+//       trkset.setGyrZOff(filt_gyro.z);
+//       k_mutex_unlock(&data_mutex);
+
+//       if (fabsf(current_off.x - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
+//           fabsf(current_off.y - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
+//           fabsf(current_off.z - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
+//         if (!sent_gyro_cal_msg) {
+//           k_sem_give(&saveToFlash_sem);
+//           LOG_INF("Gyro calibration differs from saved value. Updating flash, x=%.3f,y=%.3f,z=%.3f",
+//                (double)filt_gyro.x, (double)filt_gyro.y, (double)filt_gyro.z);
+//           sent_gyro_cal_msg = true;
+//         }
+//       }
+//       filter_samples++;
+//     }
+//   } else {
+//     filter_samples = 0;
+//   }
+
+//   // Output in CSV format for determining limits
+//   // printk("%.4f,%.2f,%.2f\n", (float)time / 1000000.0f, gyro_dif, acc_dif);
+// }
+
 // FROM https://stackoverflow.com/questions/1628386/normalise-orientation-between-0-and-360
 // Normalizes any number to an arbitrary range
 // by assuming the range wraps around when going below min or above max
@@ -1310,35 +1426,45 @@ float normalize(const float value, const float start, const float end)
 }
 
 // Rotate, in Order X -> Y -> Z
-
 void rotate(float pn[3], const float rotation[3])
 {
-  float rot[3] = {0, 0, 0};
-  float out[3] = {0, 0, 0};
-  std::copy(rotation, rotation + 3, rot);
+  static float cached_rot[3] = {FLT_MAX, FLT_MAX, FLT_MAX};  // Cache for rotation values
+  static float sin_rot[3], cos_rot[3];           // Cached trig values
+  static float out[3];                           // Static to avoid allocation
 
-  // Passed in Degrees
-  rot[0] *= DEG_TO_RAD;
-  rot[1] *= DEG_TO_RAD;
-  rot[2] *= DEG_TO_RAD;
+  // Check if rotation values changed and update cache
+  if (cached_rot[0] != rotation[0] || 
+      cached_rot[1] != rotation[1] || 
+      cached_rot[2] != rotation[2]) {
+    cached_rot[0] = rotation[0];
+    cached_rot[1] = rotation[1];
+    cached_rot[2] = rotation[2];
+
+    // Pre-calculate sin/cos values
+    for (int i = 0; i < 3; i++) {
+      float rot_rad = rotation[i] * DEG_TO_RAD;
+      sin_rot[i] = sinf(rot_rad);
+      cos_rot[i] = cosf(rot_rad);
+    }
+  }
 
   // X Rotation
-  out[0] = pn[0] * 1 + pn[1] * 0 + pn[2] * 0;
-  out[1] = pn[0] * 0 + pn[1] * cosf(rot[0]) - pn[2] * sinf(rot[0]);
-  out[2] = pn[0] * 0 + pn[1] * sinf(rot[0]) + pn[2] * cosf(rot[0]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0];
+  out[1] = pn[1] * cos_rot[0] - pn[2] * sin_rot[0];
+  out[2] = pn[1] * sin_rot[0] + pn[2] * cos_rot[0];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Y Rotation
-  out[0] = pn[0] * cosf(rot[1]) - pn[1] * 0 + pn[2] * sinf(rot[1]);
-  out[1] = pn[0] * 0 + pn[1] * 1 + pn[2] * 0;
-  out[2] = -pn[0] * sinf(rot[1]) + pn[1] * 0 + pn[2] * cosf(rot[1]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[1] + pn[2] * sin_rot[1];
+  out[1] = pn[1];
+  out[2] = -pn[0] * sin_rot[1] + pn[2] * cos_rot[1];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Z Rotation
-  out[0] = pn[0] * cosf(rot[2]) - pn[1] * sinf(rot[2]) + pn[2] * 0.0f;
-  out[1] = pn[0] * sinf(rot[2]) + pn[1] * cosf(rot[2]) + pn[2] * 0.0f;
-  out[2] = pn[0] * 0.0f + pn[1] * 0.0f + pn[2] * 1.0f;
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[2] - pn[1] * sin_rot[2];
+  out[1] = pn[0] * sin_rot[2] + pn[1] * cos_rot[2];
+  out[2] = pn[2];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 }
 
 /* reset_fusion()
