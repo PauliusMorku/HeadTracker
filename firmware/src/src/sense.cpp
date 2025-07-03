@@ -66,21 +66,36 @@
 
 // #define DEBUG_SENSOR_RATES
 
+typedef union {
+  struct {
+    float x, y, z;
+  };
+  float data[3];
+} axis_t;
+
 void gyroCalibrate();
 void detectDoubleTap();
 
+inline float magnitude(const axis_t& v) {
+  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
+  return MAX(MIN((uint16_t)value, max_val), min_val);
+}
+
 static float auxdata[10];
-static float raccx = 0, raccy = 0, raccz = 0;
-static float rmagx = 0, rmagy = 0, rmagz = 0;
-static float rgyrx = 0, rgyry = 0, rgyrz = 0;
-static float accx = 0, accy = 0, accz = 0;
-static float magx = 0, magy = 0, magz = 0;
-static float gyrx = 0, gyry = 0, gyrz = 0;
+static axis_t racc = {{0, 0, 0}};
+static axis_t rmag = {{0, 0, 0}};
+static axis_t rgyr = {{0, 0, 0}};
+static axis_t acc = {{0, 0, 0}};
+static axis_t mag = {{0, 0, 0}};
+static axis_t gyr = {{0, 0, 0}};
 static float tilt = 0, roll = 0, pan = 0;
 static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
-static float magxoff = 0, magyoff = 0, magzoff = 0;
-static float accxoff = 0, accyoff = 0, acczoff = 0;
-static float gyrxoff = 0, gyryoff = 0, gyrzoff = 0;
+static axis_t magoff = {{0, 0, 0}};
+static axis_t accoff = {{0, 0, 0}};
+static axis_t gyroff = {{0, 0, 0}};
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
 
@@ -143,8 +158,8 @@ LOG_MODULE_REGISTER(sensors);
 static int madgreads = 0;
 static uint8_t madgsensbits = 0;
 static volatile bool firstrun = true;
-static float aacc[3] = {0, 0, 0};
-static float amag[3] = {0, 0, 0};
+static axis_t aacc = {{0, 0, 0}};
+static axis_t amag = {{0, 0, 0}};
 
 // Analog Filters
 SF1eFilter *anFilter[AN_CH_CNT];
@@ -752,44 +767,29 @@ void calculate_Thread()
     //  If data thread has it locked just skip this reading
     if (k_mutex_lock(&data_mutex, K_NO_WAIT) == 0) {
       // Raw values for calibration
-      trkset.setDataAccX(raccx);
-      trkset.setDataAccY(raccy);
-      trkset.setDataAccZ(raccz);
+      trkset.setDataAccX(racc.x);
+      trkset.setDataAccY(racc.y);
+      trkset.setDataAccZ(racc.z);
 
-      trkset.setDataGyroX(rgyrx);
-      trkset.setDataGyroY(rgyry);
-      trkset.setDataGyroZ(rgyrz);
+      trkset.setDataGyroX(rgyr.x);
+      trkset.setDataGyroY(rgyr.y);
+      trkset.setDataGyroZ(rgyr.z);
 
-      trkset.setDataMagX(rmagx);
-      trkset.setDataMagY(rmagy);
-      trkset.setDataMagZ(rmagz);
+      trkset.setDataMagX(rmag.x);
+      trkset.setDataMagY(rmag.y);
+      trkset.setDataMagZ(rmag.z);
 
-      trkset.setDataOff_AccX(accx);
-      trkset.setDataOff_AccY(accy);
-      trkset.setDataOff_AccZ(accz);
+      trkset.setDataOff_AccX(acc.x);
+      trkset.setDataOff_AccY(acc.y);
+      trkset.setDataOff_AccZ(acc.z);
 
-      trkset.setDataOff_GyroX(gyrx);
-      trkset.setDataOff_GyroY(gyry);
-      trkset.setDataOff_GyroZ(gyrz);
+      trkset.setDataOff_GyroX(gyr.x);
+      trkset.setDataOff_GyroY(gyr.y);
+      trkset.setDataOff_GyroZ(gyr.z);
 
-      trkset.setDataOff_MagX(magx);
-      trkset.setDataOff_MagY(magy);
-      trkset.setDataOff_MagZ(magz);
-
-      if(k_mutex_lock(&sensor_mutex, K_NO_WAIT) == 0) { // Ignore if locked
-        trkset.setDataTilt(tilt);
-        trkset.setDataRoll(roll);
-        trkset.setDataPan(pan);
-        k_mutex_unlock(&sensor_mutex);
-      }
-
-      trkset.setDataTiltOff(tilt - tiltoffset);
-      trkset.setDataRollOff(roll - rolloffset);
-      trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
-
-      trkset.setDataTiltOut(tiltout_ui);
-      trkset.setDataRollOut(rollout_ui);
-      trkset.setDataPanOut(panout_ui);
+      trkset.setDataOff_MagX(mag.x);
+      trkset.setDataOff_MagY(mag.y);
+      trkset.setDataOff_MagZ(mag.z);
 
       // PPM Input Values
       trkset.setDataPpmCh(ppm_in_chans);
@@ -887,24 +887,24 @@ void sensor_Thread()
     float rotation[3] = {trkset.getRotX(), trkset.getRotY(), trkset.getRotZ()};
 
     // Read the data from the sensors
-    float tacc[3] = {0.0f,0.0f,0.0f}, tgyr[3]  = {0.0f,0.0f,0.0f}, tmag[3] = {0.0f,0.0f,0.0f};
+    axis_t tacc = {{0.0f, 0.0f, 0.0f}}, tgyr = {{0.0f, 0.0f, 0.0f}}, tmag = {{0.0f, 0.0f, 0.0f}};
     bool accValid = false;
     bool gyrValid = false;
     bool magValid = false;
 
 #if defined(HAS_LSM9DS1)
     if (IMU.accelerationAvailable()) {
-      IMU.readRawAccel(tacc[0], tacc[1], tacc[2]);
-      tacc[0] *= -1.0f;  // Flip X
+      IMU.readRawAccel(tacc.x, tacc.y, tacc.z);
+      tacc.x *= -1.0f;  // Flip X
       accValid = true;
     }
     if (IMU.magneticFieldAvailable()) {
-      IMU.readRawMagnet(tmag[0], tmag[1], tmag[2]);
+      IMU.readRawMagnet(tmag.x, tmag.y, tmag.z);
       magValid = true;
     }
     if (IMU.gyroscopeAvailable()) {
-      IMU.readRawGyro(tgyr[0], tgyr[1], tgyr[2]);
-      tgyr[0] *= -1.0f;  // Flip X to match other sensors
+      IMU.readRawGyro(tgyr.x, tgyr.y, tgyr.z);
+      tgyr.x *= -1.0f;  // Flip X to match other sensors
       gyrValid = true;
     }
 #endif
@@ -922,16 +922,16 @@ void sensor_Thread()
       bmi2_error_codes_print_result(rslt);
 
       /* Converting lsb to meter per second squared for 16 bit accelerometer at 2G range. */
-      tacc[0] = lsb_to_mps2(sensor_data.acc.y, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      tacc[1] = -1.0f * lsb_to_mps2(sensor_data.acc.x, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      tacc[2] = lsb_to_mps2(sensor_data.acc.z, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      // printk("\nAccX=%4.2f,Y=%4.2f,Z=%4.2f\n", tacc[0], tacc[1], tacc[2]);
+      tacc.x = lsb_to_mps2(sensor_data.acc.y, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      tacc.y = -1.0f * lsb_to_mps2(sensor_data.acc.x, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      tacc.z = lsb_to_mps2(sensor_data.acc.z, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      // printk("\nAccX=%4.2f,Y=%4.2f,Z=%4.2f\n", tacc.x, tacc.y, tacc.z);
       /* Converting lsb to degree per second for 16 bit gyro at 2000dps range. */
 
-      tgyr[0] = lsb_to_dps(sensor_data.gyr.y, 2000, bmi2_dev.resolution);
-      tgyr[1] = -1.0f * lsb_to_dps(sensor_data.gyr.x, 2000, bmi2_dev.resolution);
-      tgyr[2] = lsb_to_dps(sensor_data.gyr.z, 2000, bmi2_dev.resolution);
-      // printk("GyrX=%4.2f,Y=%4.2f,Z=%4.2f\n", tgyr[0], tgyr[1], tgyr[2]);
+      tgyr.x = lsb_to_dps(sensor_data.gyr.y, 2000, bmi2_dev.resolution);
+      tgyr.y = -1.0f * lsb_to_dps(sensor_data.gyr.x, 2000, bmi2_dev.resolution);
+      tgyr.z = lsb_to_dps(sensor_data.gyr.z, 2000, bmi2_dev.resolution);
+      // printk("GyrX=%4.2f,Y=%4.2f,Z=%4.2f\n", tgyr.x, tgyr.y, tgyr.z);
       accValid = true;
       gyrValid = true;
     }
@@ -949,9 +949,9 @@ void sensor_Thread()
           if (rbslt != BMM150_OK) {
             bmm150_error_codes_print_result("bmm150_read_mag_data", rbslt);
           } else {
-            tmag[0] = mag_data.y;
-            tmag[1] = mag_data.x;
-            tmag[2] = mag_data.z;
+            tmag.x = mag_data.y;
+            tmag.y = mag_data.x;
+            tmag.z = mag_data.z;
             magValid = true;
           }
         }
@@ -970,17 +970,17 @@ void sensor_Thread()
       /* Read magnetic field data */
       memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
       lsm6ds3tr_c_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-      tacc[0] = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[0]) / 1000.0f;
-      tacc[1] = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[1]) / 1000.0f;
-      tacc[2] = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[2]) / 1000.0f;
+      tacc.x = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[0]) / 1000.0f;
+      tacc.y = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[1]) / 1000.0f;
+      tacc.z = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[2]) / 1000.0f;
       accValid = true;
     }
     if (reg.status_reg.gda) {
       memset(data_raw_angular_rate, 0x00, 3 * sizeof(int16_t));
       lsm6ds3tr_c_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
-      tgyr[0] = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[0]) / 1000.0f;
-      tgyr[1] = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[1]) / 1000.0f;
-      tgyr[2] = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[2]) / 1000.0f;
+      tgyr.x = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[0]) / 1000.0f;
+      tgyr.y = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[1]) / 1000.0f;
+      tgyr.z = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[2]) / 1000.0f;
       gyrValid = true;
     }
 
@@ -988,7 +988,7 @@ void sensor_Thread()
 
 #if defined(HAS_QMC5883)
     if(hasMag) {
-      if (qmc5883Read(tmag)) {
+      if (qmc5883Read(tmag.data)) {
         magValid = true;
       }
     }
@@ -1002,46 +1002,39 @@ void sensor_Thread()
     if (!mpu_get_accel_reg(_accel, &timestamp)) accValid = true;
     unsigned short ascale = 1;
     mpu_get_accel_sens(&ascale);
-    tacc[0] = (float)_accel[0] / (float)ascale;
-    tacc[1] = (float)_accel[1] / (float)ascale;
-    tacc[2] = (float)_accel[2] / (float)ascale;
+    tacc.x = (float)_accel[0] / (float)ascale;
+    tacc.y = (float)_accel[1] / (float)ascale;
+    tacc.z = (float)_accel[2] / (float)ascale;
     if (!mpu_get_gyro_reg(_gyro, &timestamp)) gyrValid = true;
     float gscale = 1.0f;
     mpu_get_gyro_sens(&gscale);
-    tgyr[0] = _gyro[0] / gscale;
-    tgyr[1] = _gyro[1] / gscale;
-    tgyr[2] = _gyro[2] / gscale;
+    tgyr.x = _gyro[0] / gscale;
+    tgyr.y = _gyro[1] / gscale;
+    tgyr.z = _gyro[2] / gscale;
 #endif
 
 #if defined(HAS_MPU6886)
-    if(!mpu6886.getAccelData(&tacc[0], &tacc[1], &tacc[2]))
+    if(!mpu6886.getAccelData(&tacc.x, &tacc.y, &tacc.z))
       accValid = true;
-    if(!mpu6886.getGyroData(&tgyr[0], &tgyr[1], &tgyr[2])) {
+    if(!mpu6886.getGyroData(&tgyr.x, &tgyr.y, &tgyr.z)) {
       gyrValid = true;
     }
 #endif
 
-    k_mutex_lock(&sensor_mutex, K_FOREVER);
-
     // -- Accelerometer
     if (accValid) {
-      raccx = tacc[0];
-      raccy = tacc[1];
-      raccz = tacc[2];
-      accxoff = trkset.getAccXOff();
-      accyoff = trkset.getAccYOff();
-      acczoff = trkset.getAccZOff();
+      racc = tacc;
 
-      accx = raccx - accxoff;
-      accy = raccy - accyoff;
-      accz = raccz - acczoff;
+      accoff.x = trkset.getAccXOff();
+      accoff.y = trkset.getAccYOff();
+      accoff.z = trkset.getAccZOff();
+
+      acc.x = racc.x - accoff.x;
+      acc.y = racc.y - accoff.y;
+      acc.z = racc.z - accoff.z;
 
       // Apply Rotation
-      float tmpacc[3] = {accx, accy, accz};
-      rotate(tmpacc, rotation);
-      accx = tmpacc[0];
-      accy = tmpacc[1];
-      accz = tmpacc[2];
+      rotate(acc.data, rotation);
 
       // For intial orientation setup
       madgsensbits |= MADGINIT_ACCEL;
@@ -1049,60 +1042,48 @@ void sensor_Thread()
 
     // --- Gyrometer Calcs
     if (gyrValid) {
-      rgyrx = tgyr[0];
-      rgyry = tgyr[1];
-      rgyrz = tgyr[2];
-      gyrxoff = trkset.getGyrXOff();
-      gyryoff = trkset.getGyrYOff();
-      gyrzoff = trkset.getGyrZOff();
+      rgyr = tgyr;
 
-      gyrx = rgyrx - gyrxoff;
-      gyry = rgyry - gyryoff;
-      gyrz = rgyrz - gyrzoff;
+      gyroff.x = trkset.getGyrXOff();
+      gyroff.y = trkset.getGyrYOff();
+      gyroff.z = trkset.getGyrZOff();
+
+      gyr.x = rgyr.x - gyroff.x;
+      gyr.y = rgyr.y - gyroff.y;
+      gyr.z = rgyr.z - gyroff.z;
 
       // Apply Rotation
-      float tmpgyr[3] = {gyrx, gyry, gyrz};
-      rotate(tmpgyr, rotation);
-      gyrx = tmpgyr[0];
-      gyry = tmpgyr[1];
-      gyrz = tmpgyr[2];
+      rotate(gyr.data, rotation);
     }
 
     if (!trkset.getDisMag()) {
       if (magValid) {
         // --- Magnetometer Calcs
-        rmagx = tmag[0];
-        rmagy = tmag[1];
-        rmagz = tmag[2];
+        rmag = tmag;
+
         float magsioff[9];
-        magxoff = trkset.getMagXOff();
-        magyoff = trkset.getMagYOff();
-        magzoff = trkset.getMagZOff();
+        magoff.x = trkset.getMagXOff();
+        magoff.y = trkset.getMagYOff();
+        magoff.z = trkset.getMagZOff();
         trkset.getMagSiOff(magsioff);
 
         // Calibrate Hard Iron Offsets
-        magx = rmagx - magxoff;
-        magy = rmagy - magyoff;
-        magz = rmagz - magzoff;
+        mag.x = rmag.x - magoff.x;
+        mag.y = rmag.y - magoff.y;
+        mag.z = rmag.z - magoff.z;
 
-        magx = (magx * magsioff[0]) + (magy * magsioff[1]) + (magz * magsioff[2]);
-        magy = (magx * magsioff[3]) + (magy * magsioff[4]) + (magz * magsioff[5]);
-        magz = (magx * magsioff[6]) + (magy * magsioff[7]) + (magz * magsioff[8]);
+        mag.x = (mag.x * magsioff[0]) + (mag.y * magsioff[1]) + (mag.z * magsioff[2]);
+        mag.y = (mag.x * magsioff[3]) + (mag.y * magsioff[4]) + (mag.z * magsioff[5]);
+        mag.z = (mag.x * magsioff[6]) + (mag.y * magsioff[7]) + (mag.z * magsioff[8]);
 
         // Apply Rotation
-        float tmpmag[3] = {magx, magy, magz};
-        rotate(tmpmag, rotation);
-        magx = tmpmag[0];
-        magy = tmpmag[1];
-        magz = tmpmag[2];
+        rotate(mag.data, rotation);
 
         // For inital orientation setup
         madgsensbits |= MADGINIT_MAG;
       }
     } else {
-      magx = 0;
-      magy = 0;
-      magz = 0;
+      mag = (axis_t){{0, 0, 0}};
       madgsensbits |= MADGINIT_MAG;
     }
 
@@ -1119,12 +1100,8 @@ void sensor_Thread()
       if (madgsensbits == MADGINIT_READY) {
         madgsensbits = 0;
         madgreads++;
-        aacc[0] = accx;
-        aacc[1] = accy;
-        aacc[2] = accz;
-        amag[0] = magx;
-        amag[1] = magy;
-        amag[2] = magz;
+        aacc = acc;
+        amag = mag;
       }
 
       // Average samples
@@ -1132,25 +1109,25 @@ void sensor_Thread()
       if (madgsensbits == MADGINIT_READY) {
         madgsensbits = 0;
         madgreads++;
-        aacc[0] += accx;
-        aacc[1] += accy;
-        aacc[2] += accz;
-        aacc[0] /= 2;
-        aacc[1] /= 2;
-        aacc[2] /= 2;
-        amag[0] += magx;
-        amag[1] += magy;
-        amag[2] += magz;
-        amag[0] /= 2;
-        amag[1] /= 2;
-        amag[2] /= 2;
+        aacc.x += acc.x;
+        aacc.y += acc.y;
+        aacc.z += acc.z;
+        aacc.x /= 2;
+        aacc.y /= 2;
+        aacc.z /= 2;
+        amag.x += mag.x;
+        amag.y += mag.y;
+        amag.z += mag.z;
+        amag.x /= 2;
+        amag.y /= 2;
+        amag.z /= 2;
       }
 
       // Got the averaged values, apply the initial orientation.
     } else if (madgreads == MADGSTART_SAMPLES - 1) {
       LOG_INF("Initial Orientation Set");
       // Pass averaged values
-      madgwick.begin(aacc[0], aacc[1], aacc[2], amag[0], amag[1], amag[2]);
+      madgwick.begin(aacc.x, aacc.y, aacc.z, amag.x, amag.y, amag.z);
       madgreads = MADGSTART_SAMPLES;
     }
 
@@ -1159,8 +1136,8 @@ void sensor_Thread()
       // Period Between Samples
       float delttime = madgwick.deltatUpdate();
 
-      madgwick.update(gyrx * DEG_TO_RAD, gyry * DEG_TO_RAD, gyrz * DEG_TO_RAD, accx, accy, accz,
-                      magx, magy, magz, delttime);
+      madgwick.update(gyr.x * DEG_TO_RAD, gyr.y * DEG_TO_RAD, gyr.z * DEG_TO_RAD,
+                      acc.x, acc.y, acc.z, mag.x, mag.y, mag.z, delttime);
       roll = madgwick.getPitch();
       tilt = madgwick.getRoll();
       pan = madgwick.getYaw();
@@ -1208,7 +1185,7 @@ void detectDoubleTap()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float acc_magnitude = sqrtf(raccx * raccx + raccy * raccy + raccz * raccz);
+  float acc_magnitude = magnitude(racc);
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
   last_acc_mag = acc_magnitude;
 
@@ -1231,9 +1208,7 @@ void gyroCalibrate()
 {
   static float last_gyro_mag = 0;
   static float last_acc_mag = 0;
-  static float filt_gyrx = 0;
-  static float filt_gyry = 0;
-  static float filt_gyrz = 0;
+  static axis_t filt_gyro = {{0, 0, 0}};
   static bool sent_gyro_cal_msg = false;
   static uint32_t filter_samples = 0;
   static uint64_t lasttime = 0;
@@ -1250,8 +1225,8 @@ void gyroCalibrate()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float gyro_magnitude = sqrtf(rgyrx * rgyrx + rgyry * rgyry + rgyrz * rgyrz);
-  float acc_magnitude = sqrtf(raccx * raccx + raccy * raccy + raccz * raccz);
+  float gyro_magnitude = magnitude(rgyr);
+  float acc_magnitude = magnitude(racc);
   float gyro_dif = (gyro_magnitude - last_gyro_mag) / deltatime;
   last_gyro_mag = gyro_magnitude;
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
@@ -1261,36 +1236,36 @@ void gyroCalibrate()
   if (fabsf(gyro_dif) < GYRO_STABLE_DIFF && fabsf(acc_dif) < ACC_STABLE_DIFF) {
     // First run, preload filter
     if (filter_samples == 0) {
-      filt_gyrx = rgyrx;
-      filt_gyry = rgyry;
-      filt_gyrz = rgyrz;
+      filt_gyro.x = rgyr.x;
+      filt_gyro.y = rgyr.y;
+      filt_gyro.z = rgyr.z;
       sent_gyro_cal_msg = false;
       filter_samples++;
     } else if (filter_samples < GYRO_STABLE_SAMPLES) {
-      filt_gyrx = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyrx) + (GYRO_SAMPLE_WEIGHT * rgyrx);
-      filt_gyry = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyry) + (GYRO_SAMPLE_WEIGHT * rgyry);
-      filt_gyrz = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyrz) + (GYRO_SAMPLE_WEIGHT * rgyrz);
+      filt_gyro.x = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.x) + (GYRO_SAMPLE_WEIGHT * rgyr.x);
+      filt_gyro.y = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.y) + (GYRO_SAMPLE_WEIGHT * rgyr.y);
+      filt_gyro.z = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.z) + (GYRO_SAMPLE_WEIGHT * rgyr.z);
       filter_samples++;
     } else if (filter_samples == GYRO_STABLE_SAMPLES) {
-      LOG_INF("Gyro Calibrated, x=%.3f,y=%.3f,z=%.3f", (double)filt_gyrx, (double)filt_gyry,
-              (double)filt_gyrz);
+      LOG_INF("Gyro Calibrated, x=%.3f,y=%.3f,z=%.3f", (double)filt_gyro.x, (double)filt_gyro.y,
+              (double)filt_gyro.z);
       gyroCalibrated = true;
       clearLEDFlag(LED_GYROCAL);
       // Set the new Gyro Offset Values
       k_mutex_lock(&data_mutex, K_FOREVER);
-      trkset.setGyrXOff(filt_gyrx);
-      trkset.setGyrYOff(filt_gyry);
-      trkset.setGyrZOff(filt_gyrz);
+      trkset.setGyrXOff(filt_gyro.x);
+      trkset.setGyrYOff(filt_gyro.y);
+      trkset.setGyrZOff(filt_gyro.z);
       k_mutex_unlock(&data_mutex);
 
       // Check if they differ from the flash values and save if out of range
-      if (fabsf(gyrxoff - filt_gyrx) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyryoff - filt_gyry) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyrzoff - filt_gyrz) > GYRO_FLASH_IF_OFFSET) {
+      if (fabsf(gyroff.x - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(gyroff.y - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(gyroff.z - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
         if (!sent_gyro_cal_msg) {
           k_sem_give(&saveToFlash_sem);
           LOG_INF("Gyro calibration differs from saved value. Updating flash, x=%.3f,y=%.3f,z=%.3f",
-               (double)filt_gyrx, (double)filt_gyry, (double)filt_gyrz);
+               (double)filt_gyro.x, (double)filt_gyro.y, (double)filt_gyro.z);
           sent_gyro_cal_msg = true;
         }
       }
@@ -1357,12 +1332,8 @@ void reset_fusion()
   madgreads = 0;
   madgsensbits = 0;
   firstrun = true;
-  aacc[0] = 0;
-  aacc[1] = 0;
-  aacc[2] = 0;
-  amag[0] = 0;
-  amag[1] = 0;
-  amag[2] = 0;
+  aacc = (axis_t){{0, 0, 0}};
+  amag = (axis_t){{0, 0, 0}};
   LOG_INF("Resetting fusion algorithm");
 }
 
@@ -1372,14 +1343,14 @@ void reset_fusion()
 void buildAuxData()
 {
   float pwmrange = (TrackerSettings::MAX_PWM - TrackerSettings::MIN_PWM);
-  auxdata[TrackerSettings::AUX_GYRX] = (gyrx / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_GYRY] = (gyry / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_GYRZ] = (gyrz / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELX] = (accx / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELY] = (accy / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELZ] = (accz / 1.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_GYRX] = (gyr.x / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_GYRY] = (gyr.y / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_GYRZ] = (gyr.z / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_ACCELX] = (acc.x / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_ACCELY] = (acc.y / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+  auxdata[TrackerSettings::AUX_ACCELZ] = (acc.z / 1.0f) * pwmrange + TrackerSettings::PPM_CENTER;
   auxdata[TrackerSettings::AUX_ACCELZO] =
-      ((accz - 1.0f) / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+      ((acc.z - 1.0f) / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
   auxdata[TrackerSettings::BT_RSSI] =
       static_cast<float>(BTGetRSSI()) / 127.0f * pwmrange + TrackerSettings::MIN_PWM;
 }
