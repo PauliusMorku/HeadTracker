@@ -1226,9 +1226,12 @@ void gyroCalibrate()
       sent_gyro_cal_msg = false;
       filter_samples++;
     } else if (filter_samples < GYRO_STABLE_SAMPLES) {
-      filt_gyro.x = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.x) + (GYRO_SAMPLE_WEIGHT * rgyr.x);
-      filt_gyro.y = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.y) + (GYRO_SAMPLE_WEIGHT * rgyr.y);
-      filt_gyro.z = ((1.0f - GYRO_SAMPLE_WEIGHT) * filt_gyro.z) + (GYRO_SAMPLE_WEIGHT * rgyr.z);
+      static const float GYRO_FILTER_COEFF_OLD = 1.0f - GYRO_SAMPLE_WEIGHT;
+      static const float GYRO_FILTER_COEFF_NEW = GYRO_SAMPLE_WEIGHT;
+      
+      filt_gyro.x = (GYRO_FILTER_COEFF_OLD * filt_gyro.x) + (GYRO_FILTER_COEFF_NEW * rgyr.x);
+      filt_gyro.y = (GYRO_FILTER_COEFF_OLD * filt_gyro.y) + (GYRO_FILTER_COEFF_NEW * rgyr.y);
+      filt_gyro.z = (GYRO_FILTER_COEFF_OLD * filt_gyro.z) + (GYRO_FILTER_COEFF_NEW * rgyr.z);
       filter_samples++;
     } else if (filter_samples == GYRO_STABLE_SAMPLES) {
       LOG_INF("Gyro Calibrated, x=%.3f,y=%.3f,z=%.3f", (double)filt_gyro.x, (double)filt_gyro.y,
