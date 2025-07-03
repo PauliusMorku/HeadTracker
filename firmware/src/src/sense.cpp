@@ -27,7 +27,6 @@
 #include "analog.h"
 #include "ble.h"
 #include "defines.h"
-#include "filters.h"
 #include "filters/SF1eFilter.h"
 #include "io.h"
 #include "joystick.h"
@@ -608,13 +607,13 @@ void calculate_Thread()
 
     // 7) Set Analog Channels
     // Battery voltage monitor is always analog zero if it has the feature
-#if defined(ANVOLTMON)
+#ifdef ANVOLTMON
     float anbatt = SF1eFilterDo(anVoltFilter, analogRead(ANVOLTMON));
     anbatt *= ANVOLTMON_SCALE;
     anbatt += ANVOLTMON_OFFSET;
 #endif
 
-#if defined(AN0)
+#ifdef AN0
     if (trkset.getAn0Ch() > 0) {
       float an4 = SF1eFilterDo(anFilter[0], analogRead(AN0));
       an4 *= trkset.getAn0Gain();
@@ -1002,7 +1001,6 @@ void sensor_Thread()
     unsigned long timestamp;
     if (!mpu_get_accel_reg(_accel, &timestamp)) accValid = true;
     unsigned short ascale = 1;
-    ;
     mpu_get_accel_sens(&ascale);
     tacc[0] = (float)_accel[0] / (float)ascale;
     tacc[1] = (float)_accel[1] / (float)ascale;
@@ -1109,8 +1107,7 @@ void sensor_Thread()
     }
 
     // Run Gyro Calibration, only on good gyro data
-    if (gyrValid)
-    {
+    if (gyrValid) {
       gyroCalibrate();
       // If double tap detection is enabled, check for it
       if(trkset.getRstOnDbltTap())
@@ -1152,7 +1149,7 @@ void sensor_Thread()
       // Got the averaged values, apply the initial orientation.
     } else if (madgreads == MADGSTART_SAMPLES - 1) {
       LOG_INF("Initial Orientation Set");
-      // Pass it averaged values
+      // Pass averaged values
       madgwick.begin(aacc[0], aacc[1], aacc[2], amag[0], amag[1], amag[2]);
       madgreads = MADGSTART_SAMPLES;
     }
@@ -1201,7 +1198,6 @@ void sensor_Thread()
 
 void detectDoubleTap()
 {
-
   static float last_acc_mag = 0;
   static uint64_t lasttaptime = 0;
   static uint64_t lasttime = 0;
@@ -1321,7 +1317,6 @@ float normalize(const float value, const float start, const float end)
 }
 
 // Rotate, in Order X -> Y -> Z
-
 void rotate(float pn[3], const float rotation[3])
 {
   float rot[3] = {0, 0, 0};
