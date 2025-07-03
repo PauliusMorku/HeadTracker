@@ -187,6 +187,59 @@ bool UartGetConnected()
   return false;
 }
 
+// Rate table with frequencies in Hz
+static const struct {
+    expresslrs_RFrates_e rate;
+    uint32_t frequency_hz;
+} rate_table[] = {
+    {RATE_LORA_4HZ, 4},
+    {RATE_LORA_25HZ, 25},
+    {RATE_LORA_50HZ, 50},
+    {RATE_LORA_100HZ, 100},
+    // {RATE_LORA_100HZ_8CH, 100},
+    {RATE_LORA_150HZ, 150},
+    {RATE_LORA_200HZ, 200},
+    {RATE_LORA_250HZ, 250},
+    // {RATE_LORA_333HZ_8CH, 333},
+    {RATE_LORA_500HZ, 500},
+    // {RATE_DVDA_250HZ, 250},
+    // {RATE_DVDA_500HZ, 500},
+    // {RATE_FLRC_500HZ, 500},
+    {RATE_FLRC_1000HZ, 1000},
+};
+
+// Function to find closest rate to target frequency
+expresslrs_RFrates_e getClosestRFRate(uint32_t target_freq_hz) {
+    static uint32_t cached_freq = 0;
+    static expresslrs_RFrates_e cached_rate = RATE_FLRC_500HZ;
+    
+    // Return cached result if frequency hasn't changed
+    if (cached_freq == target_freq_hz) {
+        return cached_rate;
+    }
+    
+    // Compute new rate
+    expresslrs_RFrates_e closest_rate = RATE_FLRC_500HZ;
+    uint32_t min_diff = UINT32_MAX;
+    
+    for (size_t i = 0; i < sizeof(rate_table) / sizeof(rate_table[0]); i++) {
+        uint32_t diff = (target_freq_hz > rate_table[i].frequency_hz) ? 
+                       (target_freq_hz - rate_table[i].frequency_hz) : 
+                       (rate_table[i].frequency_hz - target_freq_hz);
+        
+        if (diff < min_diff) {
+            min_diff = diff;
+            closest_rate = rate_table[i].rate;
+        }
+    }
+    
+    // Cache the result
+    cached_freq = target_freq_hz;
+    cached_rate = closest_rate;
+    
+    return closest_rate;
+}
+
 bool UartGetChannels(uint16_t channels[16])
 {
   for (int i = 0; i < 16; i++) {
@@ -201,14 +254,14 @@ bool UartGetChannels(uint16_t channels[16])
   return dataIsValid;
 }
 
-void UartSetChannels(uint16_t channels[16])
+void UartSetChannels(uint16_t channels[16], uint16_t rate)
 {
   switch (curmode) {
     case UARTSBUSIO:
       for (int i = 0; i < 16; i++) {
         channels[i] = (static_cast<float>(channels[i]) - TrackerSettings::PPM_CENTER) *
                           TrackerSettings::SBUS_SCALE +
-                      TrackerSettings::SBUS_CENTER;
+                          TrackerSettings::SBUS_CENTER;
       }
       SbusWriteChannels(channels);
       break;
@@ -229,7 +282,7 @@ void UartSetChannels(uint16_t channels[16])
       crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channels[13]);
       crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channels[14]);
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channels[15]);
-      crsfout.LinkStatistics.rf_Mode = RATE_LORA_100HZ_8CH;
+      crsfout.LinkStatistics.rf_Mode = getClosestRFRate(rate);
       break;
     default:
       break;

@@ -14,4 +14,4 @@ void UartSetMode(uartmodet mode);
 uartmodet UartGetMode();
 
 bool UartGetChannels(uint16_t channels[16]);
-void UartSetChannels(uint16_t channels[16]);
+void UartSetChannels(uint16_t channels[16], uint16_t rate);

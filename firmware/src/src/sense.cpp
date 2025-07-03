@@ -65,11 +65,8 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
-#include "CRSF/crsfout.h"
-extern CRSF crsfout;
-extern uint16_t US_to_CRSF(uint16_t val);
-
 // #define DEBUG_SENSOR_RATES
+#define KEEP_UNUSED
 
 typedef union {
   struct {
@@ -82,18 +79,8 @@ void gyroCalibrate();
 void detectDoubleTap();
 
 
-// Optimized magnitude calculation with caching for frequently called contexts
-inline float magnitude_cached(const axis_t& v, axis_t& last_v, float& cached_result) {
-  const float MAGNITUDE_EPSILON = 0.05f; // Cache tolerance - optimized for head tracker
-  
-  // Only recalculate if vector changed significantly
-  if (fabsf(v.x - last_v.x) > MAGNITUDE_EPSILON || 
-      fabsf(v.y - last_v.y) > MAGNITUDE_EPSILON || 
-      fabsf(v.z - last_v.z) > MAGNITUDE_EPSILON) {
-    cached_result = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-    last_v = v;
-  }
-  return cached_result;
+inline float magnitude(const axis_t& v) {
+  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
 inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
@@ -110,6 +97,7 @@ static axis_t gyr = {{0, 0, 0}};
 static uint16_t rollout_ui_shared = 0;
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
+static uint32_t crsfActualRate = 0;
 
 // Input Channel Data
 static uint16_t ppm_in_chans[16];
@@ -510,7 +498,7 @@ void calculate_Thread()
     for (int i = 0; i < 16; i++) local_channel_data[i] = 0;
 
     // 2) Read all PPM inputs
-#if 0
+#ifdef KEEP_UNUSED
     PpmIn_execute();
     for (int i = 0; i < 16; i++)
       ppm_in_chans[i] = 0;  // Reset all PPM in channels to Zero (Not active)
@@ -523,7 +511,7 @@ void calculate_Thread()
 #endif
 
     // 3) Set all incoming UART values (Sbus/Crsf)
-#if 0
+#ifdef KEEP_UNUSED
     bool isUartValid = UartGetChannels(uart_in_chans);
     static bool lostmsgsent = false;
     static bool recmsgsent = false;
@@ -547,7 +535,7 @@ void calculate_Thread()
 #endif
 
     // 4) Set all incoming BT values
-#if 0
+#ifdef KEEP_UNUSED
     // Bluetooth cannot send a zero value for a channel with PARA. Radios see this as invalid data.
     // So, if the data is coming from a BLE head unit it also has a characteristic to nofity which
     // ones are valid alloww PPM/SBUS pass through on the head or remote boards on ch 1-8
@@ -580,7 +568,7 @@ void calculate_Thread()
     }*/ //REMOVED as of V2.1
 
     // 6) Set Auxiliary Functions
-#if 0
+#ifdef KEEP_UNUSED
     int aux0ch = trkset.getAux0Ch();
     int aux1ch = trkset.getAux1Ch();
     int aux2ch = trkset.getAux2Ch();
@@ -703,7 +691,7 @@ void calculate_Thread()
     }
 
     // 10) Set the PPM Outputs
-#if 0
+#ifdef KEEP_UNUSED
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
       uint16_t ppmout = local_channel_data[i];
@@ -720,16 +708,26 @@ void calculate_Thread()
 #endif
 
     // 12) Set all UART output channels, if disabled(0) set to center
+
+    for (int i = 0; i < 16; i++) {
+      if (local_channel_data[i] == 0) {
+        local_channel_data[i] = TrackerSettings::PPM_CENTER;
+      }
+    }
+    local_channel_data[15] = crsfActualRate + 1000;
+
     int tlti = trkset.getTltCh()-1;
     int rlli = trkset.getRllCh()-1;
-    int pani = trkset.getPanCh()-1;   
+    int pani = trkset.getPanCh()-1;
+
     k_sched_lock();
+    local_channel_data[tlti] = channel_data[tlti];
+    local_channel_data[rlli] = channel_data[rlli];
+    local_channel_data[pani] = channel_data[pani];
+
     for (int i = 0; i < 16; i++) {
       if (i == tlti || i == rlli || i == pani) {
         continue;
-      }
-      if (local_channel_data[i] == 0) {
-        channel_data[i] = TrackerSettings::PPM_CENTER;
       } else {
         channel_data[i] = local_channel_data[i];
       }
@@ -737,7 +735,7 @@ void calculate_Thread()
     k_sched_unlock();
 
     // 13) Set PWM Channels
-#if 0
+#ifdef KEEP_UNUSED
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
@@ -750,7 +748,7 @@ void calculate_Thread()
 #endif
 
     // 14 Set USB Joystick Channels, Only 8 channels, Half rate or USB is overwhelmed
-#if 0
+#ifdef KEEP_UNUSED
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
@@ -1165,27 +1163,16 @@ void sensor_Thread()
       if (panch > 0 && panch <= 16) channel_data[panch - 1] = panout_ui;
     }
 
-    k_sched_lock(); // don't allow uart thread to read while we are writing
+    uint32_t sensorPeriod = SENSOR_PERIOD;
+
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-      crsfout.PackedRCdataOut.ch0 = US_to_CRSF(channel_data[0]);
-      crsfout.PackedRCdataOut.ch1 = US_to_CRSF(channel_data[1]);
-      crsfout.PackedRCdataOut.ch2 = US_to_CRSF(channel_data[2]);
-      crsfout.PackedRCdataOut.ch3 = US_to_CRSF(channel_data[3]);
-      crsfout.PackedRCdataOut.ch4 = US_to_CRSF(channel_data[4]);
-      crsfout.PackedRCdataOut.ch5 = US_to_CRSF(channel_data[5]);
-      crsfout.PackedRCdataOut.ch6 = US_to_CRSF(channel_data[6]);
-      crsfout.PackedRCdataOut.ch7 = US_to_CRSF(channel_data[7]);
-      crsfout.PackedRCdataOut.ch8 = US_to_CRSF(channel_data[8]);
-      crsfout.PackedRCdataOut.ch9 = US_to_CRSF(channel_data[9]);
-      crsfout.PackedRCdataOut.ch10 = US_to_CRSF(channel_data[10]);
-      crsfout.PackedRCdataOut.ch11 = US_to_CRSF(channel_data[11]);
-      crsfout.PackedRCdataOut.ch12 = US_to_CRSF(channel_data[12]);
-      crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channel_data[13]);
-      crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channel_data[14]);
-      crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channel_data[15]);
-      crsfout.LinkStatistics.rf_Mode = RATE_FLRC_500HZ;
+      uint32_t crsfRate = ((trkset.getCrsfTxRate()+1) * 4);
+      sensorPeriod = (1.0f / (float)crsfRate) * 1.0e6f;
+
+      k_sched_lock(); // don't allow uart thread to read while we are writing
+      UartSetChannels(channel_data, crsfRate);
+      k_sched_unlock();
     }
-    k_sched_unlock();
 
     // k_sched_lock(); // Not needed because of high priority of this thread
     rollout_ui_shared = rollout_ui;
@@ -1205,38 +1192,28 @@ void sensor_Thread()
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
 
-    // In fast CRSF mode, run sensor thread faster to minimize latency
-    uint32_t sensorPeriod = SENSOR_PERIOD;
-    if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
-      sensorPeriod = (1.0f / (float)((trkset.getCrsfTxRate()+1) * 4)) * 1.0e6f;
-    }
-
     if (sensorPeriod - senseUsDuration <
-        sensorPeriod * 0.1) {  // Took a long time. Will crash if sleep is too short
+        sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
       k_usleep(sensorPeriod);
     } else {
       k_usleep(sensorPeriod - senseUsDuration);
     }
 
-#if defined(DEBUG_SENSOR_RATES)
     static int mcount = 0;
     static int64_t mmic = millis64() + 1000;
     if (mmic < millis64()) {  // Every Second
       mmic = millis64() + 1000;
-      LOG_INF("Sense Rate = %d", mcount);
+      crsfActualRate = mcount;
       mcount = 0;
     }
     if (accValid) mcount++;
-#endif
   }  // END THREAD
 }
 
 void detectDoubleTap()
 {
   static float last_acc_mag = 0;
-  static float cached_acc_mag = 0;
-  static axis_t last_racc = {{FLT_MAX, FLT_MAX, FLT_MAX}};
   static uint64_t lasttaptime = 0;
   static uint64_t lasttime = 0;
   uint64_t time = millis64();
@@ -1246,7 +1223,7 @@ void detectDoubleTap()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float acc_magnitude = magnitude_cached(racc, last_racc, cached_acc_mag);
+  float acc_magnitude = magnitude(racc);
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
   last_acc_mag = acc_magnitude;
 
@@ -1269,10 +1246,6 @@ void gyroCalibrate()
 {
   static float last_gyro_mag = 0;
   static float last_acc_mag = 0;
-  static float cached_gyro_mag = 0;
-  static float cached_acc_mag = 0;
-  static axis_t last_rgyr = {{FLT_MAX, FLT_MAX, FLT_MAX}};
-  static axis_t last_racc = {{FLT_MAX, FLT_MAX, FLT_MAX}};
   static axis_t filt_gyro = {{0, 0, 0}};
   static bool sent_gyro_cal_msg = false;
   static uint32_t filter_samples = 0;
@@ -1290,8 +1263,8 @@ void gyroCalibrate()
   if (deltatime == 0.0f) return;
   lasttime = time;
 
-  float gyro_magnitude = magnitude_cached(rgyr, last_rgyr, cached_gyro_mag);
-  float acc_magnitude = magnitude_cached(racc, last_racc, cached_acc_mag);
+  float gyro_magnitude = magnitude(rgyr);
+  float acc_magnitude = magnitude(racc);
   float gyro_dif = (gyro_magnitude - last_gyro_mag) / deltatime;
   last_gyro_mag = gyro_magnitude;
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
@@ -1368,11 +1341,6 @@ float normalize(const float value, const float start, const float end)
 
 // Rotate, in Order X -> Y -> Z
 // NOTE: Thread-safe - only called from sensor_Thread() sequentially
-// Alternative thread-safe implementation (if needed in future):
-// static K_MUTEX_DEFINE(rotate_mutex);
-// k_mutex_lock(&rotate_mutex, K_FOREVER);
-// ... cache operations ...
-// k_mutex_unlock(&rotate_mutex);
 void rotate(float pn[3], const float rotation[3])
 {
   static float cached_rot[3] = {FLT_MAX, FLT_MAX, FLT_MAX};  // Cache for rotation values
@@ -1380,11 +1348,9 @@ void rotate(float pn[3], const float rotation[3])
   static float out[3];                           // Static to avoid allocation
 
   // Check if rotation values changed and update cache
-  // Use epsilon to prevent precision-induced cache misses that would break optimization
-  const float ROTATION_EPSILON = 0.001f;  // 0.001 degree tolerance
-  if (fabsf(cached_rot[0] - rotation[0]) > ROTATION_EPSILON || 
-      fabsf(cached_rot[1] - rotation[1]) > ROTATION_EPSILON || 
-      fabsf(cached_rot[2] - rotation[2]) > ROTATION_EPSILON) {
+  if (cached_rot[0] != rotation[0] || 
+      cached_rot[1] != rotation[1] || 
+      cached_rot[2] != rotation[2]) {
     cached_rot[0] = rotation[0];
     cached_rot[1] = rotation[1];
     cached_rot[2] = rotation[2];
