@@ -1058,8 +1058,8 @@ void sensor_Thread()
     if (gyrValid) {
       gyroCalibrate();
       // If double tap detection is enabled, check for it
-      if(trkset.getRstOnDbltTap())
-        detectDoubleTap();
+      // if(trkset.getRstOnDbltTap())
+      //   detectDoubleTap();
     }
 
     // Only do this update after the first mag and accel data have been read.
