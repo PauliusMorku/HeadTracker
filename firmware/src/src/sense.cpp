@@ -996,14 +996,13 @@ void sensor_Thread()
     // Read MPU6500
     short _gyro[3];
     short _accel[3];
-    unsigned long timestamp;
-    if (!mpu_get_accel_reg(_accel, &timestamp)) accValid = true;
+    if (!mpu_get_accel_reg(_accel, nullptr)) accValid = true;
     unsigned short ascale = 1;
     mpu_get_accel_sens(&ascale);
     tacc.x = (float)_accel[0] / (float)ascale;
     tacc.y = (float)_accel[1] / (float)ascale;
     tacc.z = (float)_accel[2] / (float)ascale;
-    if (!mpu_get_gyro_reg(_gyro, &timestamp)) gyrValid = true;
+    if (!mpu_get_gyro_reg(_gyro, nullptr)) gyrValid = true;
     float gscale = 1.0f;
     mpu_get_gyro_sens(&gscale);
     tgyr.x = _gyro[0] / gscale;
