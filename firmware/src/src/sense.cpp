@@ -94,9 +94,6 @@ static axis_t mag = {{0, 0, 0}};
 static axis_t gyr = {{0, 0, 0}};
 static float tilt = 0, roll = 0, pan = 0;
 static float rolloffset = 0, panoffset = 0, tiltoffset = 0;
-static axis_t magoff = {{0, 0, 0}};
-static axis_t accoff = {{0, 0, 0}};
-static axis_t gyroff = {{0, 0, 0}};
 static bool trpOutputEnabled = false;  // Default to disabled T/R/P output
 static bool gyroCalibrated = false;
 
@@ -1026,13 +1023,9 @@ void sensor_Thread()
     if (accValid) {
       racc = tacc;
 
-      accoff.x = trkset.getAccXOff();
-      accoff.y = trkset.getAccYOff();
-      accoff.z = trkset.getAccZOff();
-
-      acc.x = racc.x - accoff.x;
-      acc.y = racc.y - accoff.y;
-      acc.z = racc.z - accoff.z;
+      acc.x = racc.x - trkset.getAccXOff();
+      acc.y = racc.y - trkset.getAccYOff();
+      acc.z = racc.z - trkset.getAccZOff();
 
       // Apply Rotation
       rotate(acc.data, rotation);
@@ -1045,13 +1038,9 @@ void sensor_Thread()
     if (gyrValid) {
       rgyr = tgyr;
 
-      gyroff.x = trkset.getGyrXOff();
-      gyroff.y = trkset.getGyrYOff();
-      gyroff.z = trkset.getGyrZOff();
-
-      gyr.x = rgyr.x - gyroff.x;
-      gyr.y = rgyr.y - gyroff.y;
-      gyr.z = rgyr.z - gyroff.z;
+      gyr.x = rgyr.x - trkset.getGyrXOff();
+      gyr.y = rgyr.y - trkset.getGyrYOff();
+      gyr.z = rgyr.z - trkset.getGyrZOff();
 
       // Apply Rotation
       rotate(gyr.data, rotation);
@@ -1062,16 +1051,14 @@ void sensor_Thread()
         // --- Magnetometer Calcs
         rmag = tmag;
 
+        // Get Soft Iron Offsets
         float magsioff[9];
-        magoff.x = trkset.getMagXOff();
-        magoff.y = trkset.getMagYOff();
-        magoff.z = trkset.getMagZOff();
         trkset.getMagSiOff(magsioff);
 
         // Calibrate Hard Iron Offsets - reuse tmag
-        tmag.x -= magoff.x;
-        tmag.y -= magoff.y;
-        tmag.z -= magoff.z;
+        tmag.x -= trkset.getMagXOff();
+        tmag.y -= trkset.getMagYOff();
+        tmag.z -= trkset.getMagZOff();
 
         // Soft iron correction
         mag.x = (tmag.x * magsioff[0]) + (tmag.y * magsioff[1]) + (tmag.z * magsioff[2]);
@@ -1248,17 +1235,23 @@ void gyroCalibrate()
               (double)filt_gyro.z);
       gyroCalibrated = true;
       clearLEDFlag(LED_GYROCAL);
-      // Set the new Gyro Offset Values
+
       k_mutex_lock(&data_mutex, K_FOREVER);
+      axis_t current_off = {{0, 0, 0}};
+      // Get the current Gyro Offset Values
+      current_off.x = trkset.getGyrXOff();
+      current_off.y = trkset.getGyrYOff();
+      current_off.z = trkset.getGyrZOff();
+
+      // Set the new Gyro Offset Values
       trkset.setGyrXOff(filt_gyro.x);
       trkset.setGyrYOff(filt_gyro.y);
       trkset.setGyrZOff(filt_gyro.z);
       k_mutex_unlock(&data_mutex);
 
-      // Check if they differ from the flash values and save if out of range
-      if (fabsf(gyroff.x - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyroff.y - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
-          fabsf(gyroff.z - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
+      if (fabsf(current_off.x - filt_gyro.x) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(current_off.y - filt_gyro.y) > GYRO_FLASH_IF_OFFSET ||
+          fabsf(current_off.z - filt_gyro.z) > GYRO_FLASH_IF_OFFSET) {
         if (!sent_gyro_cal_msg) {
           k_sem_give(&saveToFlash_sem);
           LOG_INF("Gyro calibration differs from saved value. Updating flash, x=%.3f,y=%.3f,z=%.3f",
