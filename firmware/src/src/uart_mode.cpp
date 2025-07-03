@@ -28,7 +28,12 @@
 #include "soc_flash.h"
 #include "trackersettings.h"
 
-// s#define DEBUG_UART_RATE
+// #define DEBUG_UART_RATE
+
+#ifdef DEBUG_UART_RATE
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(uart);
+#endif
 
 // Globals
 static uartmodet curmode = UARTDISABLE;
@@ -126,7 +131,7 @@ void uartTx_Thread()
         k_usleep((1.0f / (float)trkset.getSbusTxRate()) * 1.0e6f);
         break;
       case UARTCRSFOUT:
-        k_usleep((1.0f / (float)trkset.getCrsfTxRate()) * 1.0e6f);
+        k_usleep((1.0f / (float)(trkset.getCrsfTxRate() * 2)) * 1.0e6f);
         crsfout.sendRCFrameToFC();
         /*crsfout.AttitudeDataOut.pitch = 10;
         crsfout.AttitudeDataOut.roll = 30;
@@ -226,7 +231,7 @@ void UartSetChannels(uint16_t channels[16])
       crsfout.PackedRCdataOut.ch13 = US_to_CRSF(channels[13]);
       crsfout.PackedRCdataOut.ch14 = US_to_CRSF(channels[14]);
       crsfout.PackedRCdataOut.ch15 = US_to_CRSF(channels[15]);
-      crsfout.LinkStatistics.rf_Mode = RATE_LORA_100HZ_8CH;
+      crsfout.LinkStatistics.rf_Mode = RATE_LORA_250HZ;
       break;
     default:
       break;
