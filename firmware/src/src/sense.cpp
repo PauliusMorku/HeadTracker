@@ -510,7 +510,7 @@ void calculate_Thread()
     for (int i = 0; i < 16; i++) local_channel_data[i] = 0;
 
     // 2) Read all PPM inputs
-#if 0
+#ifdef DISABLE_UNNECESSARY
     PpmIn_execute();
     for (int i = 0; i < 16; i++)
       ppm_in_chans[i] = 0;  // Reset all PPM in channels to Zero (Not active)
@@ -523,7 +523,7 @@ void calculate_Thread()
 #endif
 
     // 3) Set all incoming UART values (Sbus/Crsf)
-#if 0
+#ifdef DISABLE_UNNECESSARY
     bool isUartValid = UartGetChannels(uart_in_chans);
     static bool lostmsgsent = false;
     static bool recmsgsent = false;
@@ -547,7 +547,7 @@ void calculate_Thread()
 #endif
 
     // 4) Set all incoming BT values
-#if 0
+#ifdef DISABLE_UNNECESSARY
     // Bluetooth cannot send a zero value for a channel with PARA. Radios see this as invalid data.
     // So, if the data is coming from a BLE head unit it also has a characteristic to nofity which
     // ones are valid alloww PPM/SBUS pass through on the head or remote boards on ch 1-8
@@ -580,7 +580,7 @@ void calculate_Thread()
     }*/ //REMOVED as of V2.1
 
     // 6) Set Auxiliary Functions
-#if 0
+#ifdef DISABLE_UNNECESSARY
     int aux0ch = trkset.getAux0Ch();
     int aux1ch = trkset.getAux1Ch();
     int aux2ch = trkset.getAux2Ch();
@@ -703,7 +703,7 @@ void calculate_Thread()
     }
 
     // 10) Set the PPM Outputs
-#if 0
+#ifdef DISABLE_UNNECESSARY
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
       uint16_t ppmout = local_channel_data[i];
@@ -737,7 +737,7 @@ void calculate_Thread()
     k_sched_unlock();
 
     // 13) Set PWM Channels
-#if 0
+#ifdef DISABLE_UNNECESSARY
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
@@ -750,7 +750,7 @@ void calculate_Thread()
 #endif
 
     // 14 Set USB Joystick Channels, Only 8 channels, Half rate or USB is overwhelmed
-#if 0
+#ifdef DISABLE_UNNECESSARY
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
@@ -810,7 +810,7 @@ void calculate_Thread()
     // Adjust sleep for a more accurate period
     usduration = micros64() - usduration;
     if (CALCULATE_PERIOD - usduration <
-        CALCULATE_PERIOD * 0.7) {  // Took a long time. Will crash if sleep is too short
+        CALCULATE_PERIOD * 0.9) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Calculate Thread Overrun %lld", usduration);
       k_usleep(CALCULATE_PERIOD);
     } else {
@@ -1212,7 +1212,7 @@ void sensor_Thread()
     }
 
     if (sensorPeriod - senseUsDuration <
-        sensorPeriod * 0.1) {  // Took a long time. Will crash if sleep is too short
+        sensorPeriod * 0.9) {  // Took a long time. Will crash if sleep is too short
       LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
       k_usleep(sensorPeriod);
     } else {
