@@ -65,6 +65,8 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
+#define CRSF_ACTUAL_RATE_CHANNEL 9
+
 // #define DEBUG_SENSOR_RATES
 
 typedef union {
@@ -708,9 +710,10 @@ void calculate_Thread()
     local_channel_data[tlti] = channel_data[tlti];
     local_channel_data[rlli] = channel_data[rlli];
     local_channel_data[pani] = channel_data[pani];
+    local_channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
 
     for (int i = 0; i < 16; i++) {
-      if (i == tlti || i == rlli || i == pani) {
+      if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
         continue;
       } else {
         channel_data[i] = local_channel_data[i];
@@ -1137,6 +1140,9 @@ void sensor_Thread()
     if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = trpOutputEnabled == true ? rollout_ui : trkset.getRll_Cnt();
     if (panch > 0 && panch <= 16) channel_data[panch - 1] = trpOutputEnabled == true ? panout_ui : trkset.getPan_Cnt();
 
+    static uint32_t crsfActualRate = 0;
+    channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = crsfActualRate / 2 + 1500; // Show crsfActualRate in Betaflight OSD as RC channel
+
     uint32_t sensorPeriod = SENSOR_PERIOD;
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
       uint32_t crsfRate = ((trkset.getCrsfTxRate()+1) * 2);
@@ -1172,16 +1178,14 @@ void sensor_Thread()
       k_usleep(sensorPeriod - senseUsDuration);
     }
 
-#if defined(DEBUG_SENSOR_RATES)
     static int mcount = 0;
     static int64_t mmic = millis64() + 1000;
     if (mmic < millis64()) {  // Every Second
       mmic = millis64() + 1000;
-      LOG_INF("Sense Rate = %d", mcount);
+      crsfActualRate = mcount;
       mcount = 0;
     }
     if (accValid) mcount++;
-#endif
   }  // END THREAD
 }
 
