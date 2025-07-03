@@ -17,6 +17,7 @@
 
 #include "sense.h"
 
+#include <float.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
@@ -1294,32 +1295,43 @@ float normalize(const float value, const float start, const float end)
 // Rotate, in Order X -> Y -> Z
 void rotate(float pn[3], const float rotation[3])
 {
-  float rot[3] = {0, 0, 0};
-  float out[3] = {0, 0, 0};
-  std::copy(rotation, rotation + 3, rot);
+  static float cached_rot[3] = {FLT_MAX, FLT_MAX, FLT_MAX};  // Cache for rotation values
+  static float sin_rot[3], cos_rot[3];           // Cached trig values
+  static float out[3];                           // Static to avoid allocation
 
-  // Passed in Degrees
-  rot[0] *= DEG_TO_RAD;
-  rot[1] *= DEG_TO_RAD;
-  rot[2] *= DEG_TO_RAD;
+  // Check if rotation values changed and update cache
+  if (cached_rot[0] != rotation[0] || 
+      cached_rot[1] != rotation[1] || 
+      cached_rot[2] != rotation[2]) {
+    cached_rot[0] = rotation[0];
+    cached_rot[1] = rotation[1];
+    cached_rot[2] = rotation[2];
+
+    // Pre-calculate sin/cos values
+    for (int i = 0; i < 3; i++) {
+      float rot_rad = rotation[i] * DEG_TO_RAD;
+      sin_rot[i] = sinf(rot_rad);
+      cos_rot[i] = cosf(rot_rad);
+    }
+  }
 
   // X Rotation
-  out[0] = pn[0] * 1 + pn[1] * 0 + pn[2] * 0;
-  out[1] = pn[0] * 0 + pn[1] * cosf(rot[0]) - pn[2] * sinf(rot[0]);
-  out[2] = pn[0] * 0 + pn[1] * sinf(rot[0]) + pn[2] * cosf(rot[0]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0];
+  out[1] = pn[1] * cos_rot[0] - pn[2] * sin_rot[0];
+  out[2] = pn[1] * sin_rot[0] + pn[2] * cos_rot[0];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Y Rotation
-  out[0] = pn[0] * cosf(rot[1]) - pn[1] * 0 + pn[2] * sinf(rot[1]);
-  out[1] = pn[0] * 0 + pn[1] * 1 + pn[2] * 0;
-  out[2] = -pn[0] * sinf(rot[1]) + pn[1] * 0 + pn[2] * cosf(rot[1]);
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[1] + pn[2] * sin_rot[1];
+  out[1] = pn[1];
+  out[2] = -pn[0] * sin_rot[1] + pn[2] * cos_rot[1];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 
   // Z Rotation
-  out[0] = pn[0] * cosf(rot[2]) - pn[1] * sinf(rot[2]) + pn[2] * 0.0f;
-  out[1] = pn[0] * sinf(rot[2]) + pn[1] * cosf(rot[2]) + pn[2] * 0.0f;
-  out[2] = pn[0] * 0.0f + pn[1] * 0.0f + pn[2] * 1.0f;
-  std::copy(out, out + 3, pn);
+  out[0] = pn[0] * cos_rot[2] - pn[1] * sin_rot[2];
+  out[1] = pn[0] * sin_rot[2] + pn[1] * cos_rot[2];
+  out[2] = pn[2];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
 }
 
 /* reset_fusion()
