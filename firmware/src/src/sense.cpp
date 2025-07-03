@@ -80,21 +80,54 @@ typedef union {
 
 void gyroCalibrate();
 void detectDoubleTap();
+void runMagnitudeBenchmark(const axis_t& test_vector);
+void enableMagnitudeBenchmark(bool enable);
+void runRotationBenchmark(const float test_rotation[3]);
+void enableRotationBenchmark(bool enable);
 
+// Cache performance counters - separate for different sensor types
+static uint32_t acc_cache_hits = 0;
+static uint32_t acc_cache_misses = 0;
+static uint32_t gyro_cache_hits = 0;
+static uint32_t gyro_cache_misses = 0;
+static uint32_t rotation_cache_hits = 0;
+static uint32_t rotation_cache_misses = 0;
+static uint64_t last_stats_time = 0;
 
 // Optimized magnitude calculation with caching for frequently called contexts
-inline float magnitude_cached(const axis_t& v, axis_t& last_v, float& cached_result) {
-  const float MAGNITUDE_EPSILON = 0.05f; // Cache tolerance - optimized for head tracker
-  
+inline float magnitude_cached(const axis_t& v, axis_t& last_v, float& cached_result, float epsilon = 0.05f, bool is_gyro = false) {
   // Only recalculate if vector changed significantly
-  if (fabsf(v.x - last_v.x) > MAGNITUDE_EPSILON || 
-      fabsf(v.y - last_v.y) > MAGNITUDE_EPSILON || 
-      fabsf(v.z - last_v.z) > MAGNITUDE_EPSILON) {
+  if (fabsf(v.x - last_v.x) > epsilon || 
+      fabsf(v.y - last_v.y) > epsilon || 
+      fabsf(v.z - last_v.z) > epsilon) {
     cached_result = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
     last_v = v;
+    if (is_gyro) {
+      gyro_cache_misses++;
+    } else {
+      acc_cache_misses++;
+    }
+  } else {
+    if (is_gyro) {
+      gyro_cache_hits++;
+    } else {
+      acc_cache_hits++;
+    }
   }
   return cached_result;
 }
+
+// Direct magnitude calculation without caching
+inline float magnitude_direct(const axis_t& v) {
+  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+// Benchmark variables
+static uint32_t benchmark_iterations = 0;
+static uint64_t benchmark_time_cached = 0;
+static uint64_t benchmark_time_direct = 0;
+static uint64_t last_benchmark_time = 0;
+static bool benchmark_enabled = false;
 
 inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
   return MAX(MIN((uint16_t)value, max_val), min_val);
@@ -164,6 +197,204 @@ MPU6886 mpu6886;
 #define MADGINIT_READY (MADGINIT_ACCEL | MADGINIT_MAG)
 
 LOG_MODULE_REGISTER(sensors);
+
+// Local timing override to avoid issues with micros64()
+#undef micros64
+#define micros64() k_uptime_get()
+
+// Local constants for gyro calibration (avoid modifying defines.h)
+#define GYRO_STABLE_DIFF 2.0f        // Maximum gyro movement allowed for calibration (deg/s per second)
+#define ACC_STABLE_DIFF 2.0f         // Maximum accelerometer movement allowed for calibration (g per second)
+
+// Benchmark function to compare cached vs direct magnitude calculations
+void runMagnitudeBenchmark(const axis_t& test_vector) {
+  if (!benchmark_enabled) return;
+  
+  const uint32_t NUM_ITERATIONS = 1000; // Number of calculations per benchmark run
+  uint64_t start_time, end_time;
+  
+  // Benchmark variables for cached version
+  static float cached_result = 0;
+  static axis_t last_vector = {{FLT_MAX, FLT_MAX, FLT_MAX}};
+  
+  // Benchmark direct calculations
+  start_time = k_uptime_get();
+  for (uint32_t i = 0; i < NUM_ITERATIONS; i++) {
+    volatile float result = magnitude_direct(test_vector);
+    (void)result; // Prevent optimization
+  }
+  end_time = k_uptime_get();
+  benchmark_time_direct += (end_time - start_time);
+  
+  // Benchmark cached calculations
+  start_time = k_uptime_get();
+  for (uint32_t i = 0; i < NUM_ITERATIONS; i++) {
+    volatile float result = magnitude_cached(test_vector, last_vector, cached_result, 0.05f, false);
+    (void)result; // Prevent optimization
+  }
+  end_time = k_uptime_get();
+  benchmark_time_cached += (end_time - start_time);
+  
+  benchmark_iterations++;
+  
+  // Print results every second
+  uint64_t current_time = millis64();
+  if (current_time - last_benchmark_time >= 1000) {
+    if (benchmark_iterations > 0) {
+      float avg_time_direct = (float)benchmark_time_direct / (benchmark_iterations * NUM_ITERATIONS);
+      float avg_time_cached = (float)benchmark_time_cached / (benchmark_iterations * NUM_ITERATIONS);
+      float speedup = avg_time_direct / avg_time_cached;
+      
+      LOG_INF("Magnitude Benchmark Results:");
+      LOG_INF("  Direct:  %.3f ms/call (%u ms total)", 
+              (double)avg_time_direct, (uint32_t)benchmark_time_direct);
+      LOG_INF("  Cached:  %.3f ms/call (%u ms total)", 
+              (double)avg_time_cached, (uint32_t)benchmark_time_cached);
+      LOG_INF("  Speedup: %.2fx %s", (double)speedup, 
+              speedup > 1.0f ? "(cached faster)" : "(direct faster)");
+      LOG_INF("  Iterations: %u (each with %u calculations)", 
+              benchmark_iterations, NUM_ITERATIONS);
+    }
+    
+    // Reset counters for next measurement period
+    benchmark_iterations = 0;
+    benchmark_time_cached = 0;
+    benchmark_time_direct = 0;
+    last_benchmark_time = current_time;
+  }
+}
+
+// Enable/disable benchmark
+void enableMagnitudeBenchmark(bool enable) {
+  benchmark_enabled = enable;
+  if (enable) {
+    LOG_INF("Magnitude benchmark enabled");
+    // Reset counters
+    benchmark_iterations = 0;
+    benchmark_time_cached = 0;
+    benchmark_time_direct = 0;
+    last_benchmark_time = millis64();
+  } else {
+    LOG_INF("Magnitude benchmark disabled");
+  }
+}
+
+// Direct rotation function without caching
+void rotate_direct(float pn[3], const float rotation[3]) {
+  static float out[3];  // Static to avoid allocation
+  
+  // Calculate sin/cos values directly each time
+  float sin_rot[3], cos_rot[3];
+  for (int i = 0; i < 3; i++) {
+    float rot_rad = rotation[i] * DEG_TO_RAD;
+    sin_rot[i] = sinf(rot_rad);
+    cos_rot[i] = cosf(rot_rad);
+  }
+
+  // X Rotation
+  out[0] = pn[0];
+  out[1] = pn[1] * cos_rot[0] - pn[2] * sin_rot[0];
+  out[2] = pn[1] * sin_rot[0] + pn[2] * cos_rot[0];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
+
+  // Y Rotation
+  out[0] = pn[0] * cos_rot[1] + pn[2] * sin_rot[1];
+  out[1] = pn[1];
+  out[2] = -pn[0] * sin_rot[1] + pn[2] * cos_rot[1];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
+
+  // Z Rotation
+  out[0] = pn[0] * cos_rot[2] - pn[1] * sin_rot[2];
+  out[1] = pn[0] * sin_rot[2] + pn[1] * cos_rot[2];
+  out[2] = pn[2];
+  pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
+}
+
+// Rotation benchmark variables
+static uint32_t rotation_benchmark_iterations = 0;
+static uint64_t rotation_benchmark_time_cached = 0;
+static uint64_t rotation_benchmark_time_direct = 0;
+static uint64_t last_rotation_benchmark_time = 0;
+static bool rotation_benchmark_enabled = false;
+
+// Benchmark function to compare cached vs direct rotation calculations
+void runRotationBenchmark(const float test_rotation[3]) {
+  if (!rotation_benchmark_enabled) return;
+  
+  const uint32_t NUM_ITERATIONS = 500; // Fewer iterations since rotation is more expensive
+  uint64_t start_time, end_time;
+  
+  // Test vectors for rotation
+  float test_vector_cached[3] = {1.0f, 2.0f, 3.0f};
+  float test_vector_direct[3] = {1.0f, 2.0f, 3.0f};
+  
+  // Benchmark direct calculations
+  start_time = k_uptime_get();
+  for (uint32_t i = 0; i < NUM_ITERATIONS; i++) {
+    // Reset test vector
+    test_vector_direct[0] = 1.0f + (i * 0.001f); // Slight variation to prevent optimization
+    test_vector_direct[1] = 2.0f + (i * 0.001f);
+    test_vector_direct[2] = 3.0f + (i * 0.001f);
+    rotate_direct(test_vector_direct, test_rotation);
+  }
+  end_time = k_uptime_get();
+  rotation_benchmark_time_direct += (end_time - start_time);
+  
+  // Benchmark cached calculations
+  start_time = k_uptime_get();
+  for (uint32_t i = 0; i < NUM_ITERATIONS; i++) {
+    // Reset test vector
+    test_vector_cached[0] = 1.0f + (i * 0.001f); // Slight variation to prevent optimization
+    test_vector_cached[1] = 2.0f + (i * 0.001f);
+    test_vector_cached[2] = 3.0f + (i * 0.001f);
+    rotate(test_vector_cached, test_rotation);
+  }
+  end_time = k_uptime_get();
+  rotation_benchmark_time_cached += (end_time - start_time);
+  
+  rotation_benchmark_iterations++;
+  
+  // Print results every second
+  uint64_t current_time = millis64();
+  if (current_time - last_rotation_benchmark_time >= 1000) {
+    if (rotation_benchmark_iterations > 0) {
+      float avg_time_direct = (float)rotation_benchmark_time_direct / (rotation_benchmark_iterations * NUM_ITERATIONS);
+      float avg_time_cached = (float)rotation_benchmark_time_cached / (rotation_benchmark_iterations * NUM_ITERATIONS);
+      float speedup = avg_time_direct / avg_time_cached;
+      
+      LOG_INF("Rotation Benchmark Results:");
+      LOG_INF("  Direct:  %.3f ms/call (%u ms total)", 
+              (double)avg_time_direct, (uint32_t)rotation_benchmark_time_direct);
+      LOG_INF("  Cached:  %.3f ms/call (%u ms total)", 
+              (double)avg_time_cached, (uint32_t)rotation_benchmark_time_cached);
+      LOG_INF("  Speedup: %.2fx %s", (double)speedup, 
+              speedup > 1.0f ? "(cached faster)" : "(direct faster)");
+      LOG_INF("  Iterations: %u (each with %u calculations)", 
+              rotation_benchmark_iterations, NUM_ITERATIONS);
+    }
+    
+    // Reset counters for next measurement period
+    rotation_benchmark_iterations = 0;
+    rotation_benchmark_time_cached = 0;
+    rotation_benchmark_time_direct = 0;
+    last_rotation_benchmark_time = current_time;
+  }
+}
+
+// Enable/disable rotation benchmark
+void enableRotationBenchmark(bool enable) {
+  rotation_benchmark_enabled = enable;
+  if (enable) {
+    LOG_INF("Rotation benchmark enabled");
+    // Reset counters
+    rotation_benchmark_iterations = 0;
+    rotation_benchmark_time_cached = 0;
+    rotation_benchmark_time_direct = 0;
+    last_rotation_benchmark_time = millis64();
+  } else {
+    LOG_INF("Rotation benchmark disabled");
+  }
+}
 
 static bool butdwn = false;
 static int madgreads = 0;
@@ -386,6 +617,12 @@ int sense_Init()
   // Start doing the other calculations
   k_poll_signal_raise(&calculateThreadRunSignal, 1);
   LOG_INF("Calculate Thread Signal Raised");
+
+  // Enable magnitude benchmark
+  enableMagnitudeBenchmark(true);
+  
+  // Enable rotation benchmark
+  enableRotationBenchmark(true);
 
   return 0;
 }
@@ -1085,6 +1322,59 @@ void sensor_Thread()
       //   detectDoubleTap();
     }
 
+    // Test magnitude cache performance with sensor data
+    static float test_cached_acc_mag = 0;
+    static float test_cached_gyro_mag = 0;
+    static axis_t test_last_racc = {{FLT_MAX, FLT_MAX, FLT_MAX}};
+    static axis_t test_last_rgyr = {{FLT_MAX, FLT_MAX, FLT_MAX}};
+    static uint32_t debug_counter = 0;
+    
+    // Different epsilon values for different sensor types
+    const float ACC_EPSILON = 0.02f;   // Accelerometer: smaller epsilon (more sensitive to changes)
+    const float GYRO_EPSILON = 0.1f;   // Gyroscope: larger epsilon (less sensitive, should be ~0 when stationary)
+    
+    if (accValid) {
+      // Debug: log actual changes to understand cache misses
+      if (++debug_counter % 300 == 0) { // Every 2 seconds at 150Hz
+        float acc_x_change = fabsf(racc.x - test_last_racc.x);
+        float acc_y_change = fabsf(racc.y - test_last_racc.y);
+        float acc_z_change = fabsf(racc.z - test_last_racc.z);
+        LOG_INF("Acc changes: X=%.4f, Y=%.4f, Z=%.4f (threshold=%.3f)", 
+                (double)acc_x_change, (double)acc_y_change, (double)acc_z_change, (double)ACC_EPSILON);
+      }
+      magnitude_cached(racc, test_last_racc, test_cached_acc_mag, ACC_EPSILON, false);
+    }
+    if (gyrValid) {
+      if (debug_counter % 300 == 0) { // Every 2 seconds
+        float gyro_x_change = fabsf(rgyr.x - test_last_rgyr.x);
+        float gyro_y_change = fabsf(rgyr.y - test_last_rgyr.y);
+        float gyro_z_change = fabsf(rgyr.z - test_last_rgyr.z);
+        LOG_INF("Gyro changes: X=%.4f, Y=%.4f, Z=%.4f (threshold=%.3f)", 
+                (double)gyro_x_change, (double)gyro_y_change, (double)gyro_z_change, (double)GYRO_EPSILON);
+      }
+      magnitude_cached(rgyr, test_last_rgyr, test_cached_gyro_mag, GYRO_EPSILON, true);
+    }
+    
+    // Run magnitude benchmark with current sensor data
+    if (accValid) {
+      runMagnitudeBenchmark(racc);
+    }
+    
+    // Run rotation benchmark with current rotation settings
+    if (accValid) {
+      runRotationBenchmark(rotation);
+    }
+    
+    // Enable benchmark at startup (after first few sensor readings)
+    static bool benchmark_initialized = false;
+    if (!benchmark_initialized && accValid) {
+      static uint32_t startup_counter = 0;
+      if (++startup_counter > 100) { // Wait for 100 sensor readings before starting benchmark
+        enableMagnitudeBenchmark(true);
+        benchmark_initialized = true;
+      }
+    }
+
     // Only do this update after the first mag and accel data have been read.
     if (madgreads == 0) {
       if (madgsensbits == MADGINIT_READY) {
@@ -1204,6 +1494,32 @@ void sensor_Thread()
 
     // Adjust sleep for a more accurate period
     senseUsDuration = micros64() - senseUsDuration;
+
+    // Print cache statistics every second
+    uint64_t current_time = millis64();
+    if (current_time - last_stats_time >= 1000) {
+      uint32_t total_acc_calls = acc_cache_hits + acc_cache_misses;
+      uint32_t total_gyro_calls = gyro_cache_hits + gyro_cache_misses;
+      
+      if (total_acc_calls > 0) {
+        float acc_hit_rate = (float)acc_cache_hits * 100.0f / total_acc_calls;
+        LOG_INF("Acc cache: %u hits, %u misses, %.1f%% hit rate", 
+                acc_cache_hits, acc_cache_misses, (double)acc_hit_rate);
+      }
+      
+      if (total_gyro_calls > 0) {
+        float gyro_hit_rate = (float)gyro_cache_hits * 100.0f / total_gyro_calls;
+        LOG_INF("Gyro cache: %u hits, %u misses, %.1f%% hit rate", 
+                gyro_cache_hits, gyro_cache_misses, (double)gyro_hit_rate);
+      }
+      
+      // Reset counters for next measurement period
+      acc_cache_hits = 0;
+      acc_cache_misses = 0;
+      gyro_cache_hits = 0;
+      gyro_cache_misses = 0;
+      last_stats_time = current_time;
+    }
 
     // In fast CRSF mode, run sensor thread faster to minimize latency
     uint32_t sensorPeriod = SENSOR_PERIOD;
@@ -1395,6 +1711,9 @@ void rotate(float pn[3], const float rotation[3])
       sin_rot[i] = sinf(rot_rad);
       cos_rot[i] = cosf(rot_rad);
     }
+    rotation_cache_misses++;
+  } else {
+    rotation_cache_hits++;
   }
 
   // X Rotation
