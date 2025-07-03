@@ -66,6 +66,7 @@
 #endif
 
 #define CRSF_ACTUAL_RATE_CHANNEL 9
+#define GYRO_CALIBRATED_CHANNEL 11
 
 // #define DEBUG_SENSOR_RATES
 
@@ -711,6 +712,8 @@ void calculate_Thread()
     local_channel_data[rlli] = channel_data[rlli];
     local_channel_data[pani] = channel_data[pani];
     local_channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
+
+    local_channel_data[GYRO_CALIBRATED_CHANNEL-1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::MIN_PWM;
 
     for (int i = 0; i < 16; i++) {
       if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
