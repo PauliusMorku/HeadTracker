@@ -19,6 +19,7 @@
 #define HAS_PPMIN
 #define HAS_3CH_ANALOG
 #define HAS_VOLTMON
+#define HAS_APDS9960
 
 #define AN0 5 // Pin 0.29
 #define AN1 0 // Pin 0.02
