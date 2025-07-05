@@ -19,6 +19,7 @@
 #define HAS_PPMIN
 #define HAS_3CH_ANALOG
 // #define HAS_VOLTMON
+#define HAS_APDS9960
 
 #define AN0 1 // Battery Voltage
 #define AN1 5 // Pin 0.29
@@ -61,7 +62,8 @@
   PIN(RXINVO,       NRFPIN(0,  0), "") \
   PIN(RXINVI,       NRFPIN(0,  1), "") \
   PIN(I2CSDA,       NRFPIN(0,  5), "") \
-  PIN(I2CSCL,       NRFPIN(1,  9), "")
+  PIN(I2CSCL,       NRFPIN(1,  9), "") \
+  PIN(APDSINT,    NRFPIN(0, 19), "")
 
 typedef enum {
 #define PIN(NAME, PINNO, DESC) IO_##NAME,
