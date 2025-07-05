@@ -460,6 +460,6 @@ int APDS9960::readProximity()
   return (255 - r);
 }
 
-#ifdef CONFIG_BOARD_ARDUINO_NANO_33_BLE
+#ifdef HAS_APDS9960
 APDS9960 APDS(-1);
 #endif
