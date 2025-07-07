@@ -19,6 +19,7 @@
 #define HAS_PPMIN
 #define HAS_3CH_ANALOG
 // #define HAS_VOLTMON
+#define HAS_APDS9960
 
 #define AN0 1 // Battery Voltage
 #define AN1 5 // Pin 0.29

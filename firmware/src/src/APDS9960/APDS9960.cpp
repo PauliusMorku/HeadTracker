@@ -58,7 +58,7 @@ bool APDS9960::begin()
   // Check ID register
   uint8_t id;
   if (!getID(&id)) return false;
-  if (id != 0xAB) return false;
+  if (id != 0xAB && id != 0x9E) return false;
 
   // Disable everything
   if (!setENABLE(0x00)) return false;
@@ -460,6 +460,6 @@ int APDS9960::readProximity()
   return (255 - r);
 }
 
-#ifdef CONFIG_BOARD_ARDUINO_NANO_33_BLE
+#ifdef HAS_APDS9960
 APDS9960 APDS(-1);
 #endif
