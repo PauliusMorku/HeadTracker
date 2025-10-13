@@ -481,9 +481,9 @@ void calculate_Thread()
      *   7) Set analog channels
      *   8) Set Reset Center pulse channel
      *   9) Override desired channels with pan/tilt/roll (now handled in sensor thread)
-     *  10) Output to PPMout
-     *  11) Output to Bluetooth
-     *  12) Output to SBUS
+     *  10) Sync channel outputs between calculate and sensor thread
+     *  11) Output to PPMout
+     *  12) Output to Bluetooth
      *  13) Output PWM channels
      *  14) Output to USB Joystick
      *
@@ -681,7 +681,33 @@ void calculate_Thread()
       if (trkset.getCh5Arm()) local_channel_data[4] = 2000;
     }
 
-    // 10) Set the PPM Outputs
+    // 10 Sync channel outputs between calculate and sensor thread
+    int tlti = trkset.getTltCh()-1;
+    int rlli = trkset.getRllCh()-1;
+    int pani = trkset.getPanCh()-1;
+
+    k_sched_lock();
+    if (tlti >= 0 && tlti < 16) local_channel_data[tlti] = channel_data[tlti];
+    if (rlli >= 0 && rlli < 16) local_channel_data[rlli] = channel_data[rlli];
+    if (pani >= 0 && pani < 16) local_channel_data[pani] = channel_data[pani];
+    local_channel_data[CRSF_ACTUAL_RATE_CHANNEL-1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
+    local_channel_data[GYRO_CALIBRATED_CHANNEL-1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::MIN_PWM;
+
+    for (int i = 0; i < 16; i++) {
+      if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
+        continue;
+      } else {
+        if (local_channel_data[i] == 0) {
+          // channel_data will be sent to UART in sensor thread, it needs to be centered
+          channel_data[i] = TrackerSettings::PPM_CENTER;
+        } else {
+          channel_data[i] = local_channel_data[i];
+        }
+      }
+    }
+    k_sched_unlock();
+
+    // 11) Set the PPM Outputs
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
       uint16_t ppmout = local_channel_data[i];
@@ -689,40 +715,12 @@ void calculate_Thread()
       PpmOut_setChannel(i, ppmout);
     }
 
-    // 11) Set all the BT Channels, send the zeros don't center
+    // 12) Set all the BT Channels, send the zeros don't center
     bool bleconnected = BTGetConnected();
     trkset.setDataBtAddr(BTGetAddress());
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
       BTSetChannel(i, local_channel_data[i]);
     }
-
-    // 12) Set all UART output channels, if disabled(0) set to center
-    for (int i = 0; i < 16; i++) {
-      if (local_channel_data[i] == 0) {
-        local_channel_data[i] = TrackerSettings::PPM_CENTER;
-      }
-    }
-
-    int tlti = trkset.getTltCh()-1;
-    int rlli = trkset.getRllCh()-1;
-    int pani = trkset.getPanCh()-1;
-
-    k_sched_lock();
-    local_channel_data[tlti] = channel_data[tlti];
-    local_channel_data[rlli] = channel_data[rlli];
-    local_channel_data[pani] = channel_data[pani];
-    local_channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
-
-    local_channel_data[GYRO_CALIBRATED_CHANNEL-1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::MIN_PWM;
-
-    for (int i = 0; i < 16; i++) {
-      if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
-        continue;
-      } else {
-        channel_data[i] = local_channel_data[i];
-      }
-    }
-    k_sched_unlock();
 
     // 13) Set PWM Channels
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
