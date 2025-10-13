@@ -165,7 +165,7 @@ void BTHeadStart()
 
   bt_gatt_service_register(&bthead_svc);
   bt_conn_cb_register(&conn_callbacks);
-  bt_set_name("Hello");
+  bt_set_name("HeadTracker");
 
   // Start Advertising
   int err = bt_le_adv_start(&my_param, ad, ARRAY_SIZE(ad), NULL, 0);
