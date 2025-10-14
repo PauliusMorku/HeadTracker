@@ -65,8 +65,7 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
-#define CRSF_ACTUAL_RATE_CHANNEL 9
-#define GYRO_CALIBRATED_CHANNEL 11
+#define CRSF_ACTUAL_RATE_CHANNEL 12
 
 // #define DEBUG_SENSOR_RATES
 
@@ -646,14 +645,17 @@ void calculate_Thread()
     static bool sendingresetpulse = false;
     int alertch = trkset.getAlertCh();
     if (alertch > 0) {
-      // Synthesize a pulse indicating reset center started
-      local_channel_data[alertch - 1] = TrackerSettings::MIN_PWM;
+      // Indicate gyro calibration and centering status
+      if (sendingresetpulse) {
+        local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::DEF_MAX_PWM;
+      } else {
+        local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::DEF_MIN_PWM : TrackerSettings::MIN_PWM;
+      }
       if (initiatereset) {
         sendingresetpulse = true;
         pulsetimer = 0.0f;
       }
       if (sendingresetpulse) {
-        local_channel_data[alertch - 1] = TrackerSettings::MAX_PWM;
         pulsetimer += (float)CALCULATE_PERIOD / 1000000.0f;
         if (pulsetimer > TrackerSettings::RECENTER_PULSE_DURATION) {
           sendingresetpulse = false;
@@ -691,7 +693,6 @@ void calculate_Thread()
     if (rlli >= 0 && rlli < 16) local_channel_data[rlli] = channel_data[rlli];
     if (pani >= 0 && pani < 16) local_channel_data[pani] = channel_data[pani];
     local_channel_data[CRSF_ACTUAL_RATE_CHANNEL-1] = channel_data[CRSF_ACTUAL_RATE_CHANNEL-1];
-    local_channel_data[GYRO_CALIBRATED_CHANNEL-1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::MIN_PWM;
 
     for (int i = 0; i < 16; i++) {
       if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {

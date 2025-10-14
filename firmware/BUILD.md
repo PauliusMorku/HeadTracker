@@ -53,10 +53,10 @@ west build -p -b dtqsys_ht
 ls /dev/cu.usbmodem*
 
 # Put board into bootloader mode gracefully
-python3 ../../put_in_bootloader.py /dev/cu.usbmodemXXXX
+python3 ../../put_in_bootloader.py /dev/cu.usbmodem2101
 
 # Flash the firmware using Arduino IDE bossac
-/Users/pm/Library/Arduino15/packages/arduino/tools/bossac/1.9.1-arduino2/bossac --port=tty.usbmodemXXXX -e -w -R ./build/zephyr/dtqsys_ht-*.bin
+/Users/pm/Library/Arduino15/packages/arduino/tools/bossac/1.9.1-arduino2/bossac --port=tty.usbmodem2101 -e -w -R ./build/zephyr/dtqsys_ht-*.bin
 ```
 
 #### Option B: Manual bootloader mode (double-tap reset)
