@@ -78,7 +78,7 @@ SF1eFilter *anFilter[AN_CH_CNT];
 SF1eFilter *anVoltFilter;
 
 // ============================================================================
-// Data Structures for Clean Thread Communication
+// Data Structures
 // ============================================================================
 
 typedef union {
@@ -89,38 +89,16 @@ typedef union {
 } axis_t;
 
 typedef struct {
-    axis_t acc;
-    axis_t gyr;
-    axis_t mag;
-    axis_t raw_acc;
-    axis_t raw_gyr;
-    axis_t raw_mag;
-    uint64_t timestamp;
-    bool acc_valid;
-    bool gyr_valid;
-    bool mag_valid;
-} sensor_data_t;
-
-typedef struct {
-    uint16_t channels[16];
-    bool trp_enabled;
-    bool gyro_calibrated;
-    uint64_t timestamp;
-} channel_data_t;
-
-typedef struct {
-    int tilt_ch;
-    int roll_ch;
-    int pan_ch;
-    uint16_t tilt_val;
-    uint16_t roll_val;
-    uint16_t pan_val;
-    uint32_t actual_rate;
-    bool enabled;
-} trp_update_t;
-
-// Message queues for inter-thread communication
-K_MSGQ_DEFINE(trp_msgq, sizeof(trp_update_t), 2, 4);
+    axis_t acc;        // Calibrated accelerometer for auxiliary functions
+    axis_t gyr;        // Calibrated gyroscope for auxiliary functions
+    axis_t raw_acc;    // Raw accelerometer for double-tap and calibration
+    axis_t raw_gyr;    // Raw gyroscope for calibration
+    uint16_t tilt_val; // Final tilt channel value
+    uint16_t roll_val; // Final roll channel value
+    uint16_t pan_val;  // Final pan channel value
+    uint16_t roll_ui;  // Roll value for reset-on-tilt detection
+    uint32_t actual_rate; // Actual CRSF transmission rate
+} shared_thread_data_t;  // Shared between TRP and main threads
 
 // ============================================================================
 // Helper Functions
@@ -155,23 +133,20 @@ static inline void processAnalogChannel(uint16_t* channels, int ch, float rawAna
 }
 
 // ============================================================================
-// Shared State (Minimized)
+// Shared State
 // ============================================================================
 
-// Thread-shared sensor data (populated by TRP thread, read by channel thread)
-static sensor_data_t shared_sensor_data;
+// Thread-shared sensor data and TRP output (populated by TRP thread, read by main thread)
+static shared_thread_data_t shared_thread_data;
 
-// Recenter request flag - set by channel thread, cleared by TRP thread
+// Recenter request flag - set by main thread, cleared by TRP thread
 static volatile bool recenter_requested = false;
 
 // Thread-shared output state
-static volatile uint16_t rollout_ui_shared = 0;
 static volatile bool trpOutputEnabled = false;
 static volatile bool gyroCalibrated = false;
 
-static float auxdata[10];
-
-// Input Channel Data
+// Input Channel Data (used across main thread functions)
 static uint16_t ppm_in_chans[16];
 static uint16_t uart_in_chans[16];
 static uint16_t bt_chans[TrackerSettings::BT_CHANNELS];
@@ -181,9 +156,6 @@ static float bt_chansf[TrackerSettings::BT_CHANNELS];
 static uint16_t channel_data[16];
 
 Madgwick madgwick;
-
-int64_t usduration = 0;
-int64_t senseUsDuration = 0;
 
 const struct device *i2c_dev = nullptr;
 
@@ -225,7 +197,6 @@ MPU6886 mpu6886;
 
 LOG_MODULE_REGISTER(sensors);
 
-static bool butdwn = false;
 static int madgreads = 0;
 static uint8_t madgsensbits = 0;
 static volatile bool firstrun = true;
@@ -246,9 +217,11 @@ struct k_poll_event channelRunEvents[1] = {
 
 int sense_Init()
 {
+  // I2C device pointer (local to init function)
+  const struct device *i2c_dev = nullptr;
   // If an I2C bus is defined in the device tree, initialize it
 #if DT_NODE_EXISTS(DT_ALIAS(i2csensor))
-  const struct device *i2c_dev = DEVICE_DT_GET(DT_ALIAS(i2csensor));
+  i2c_dev = DEVICE_DT_GET(DT_ALIAS(i2csensor));
   if (!i2c_dev) {
     LOG_ERR("Could not get device binding for I2C");
     return false;
@@ -461,7 +434,7 @@ void main_Thread()
       continue;
     }
 
-    usduration = micros64();
+    int64_t usduration = micros64();
 
     /* ************************************************************
      *       Build channel data
@@ -481,12 +454,32 @@ void main_Thread()
      *  12) Output to USB Joystick
      */
 
-    // Initialize channel data array
-    uint16_t local_channel_data[16] = {0};
+    // ========================================
+    // 1) Read TRP Data from TRP Thread
+    // ========================================
+    
+    // Note: For CRSF fast mode, TRP is written directly by TRP thread to channel_data
+    // This path is for non-time-critical outputs (PPM, BT, PWM, Joystick)
+    
+    // Read TRP values with scheduler lock
+    axis_t acc, gyr;
+    uint16_t tilt_val, roll_val, pan_val, roll_ui, actual_rate;
+    k_sched_lock();
+    tilt_val = shared_thread_data.tilt_val;
+    roll_val = shared_thread_data.roll_val;
+    pan_val = shared_thread_data.pan_val;
+    roll_ui = shared_thread_data.roll_ui;
+    actual_rate = shared_thread_data.actual_rate;
+    gyr = shared_thread_data.gyr;
+    acc = shared_thread_data.acc;
+    k_sched_unlock();
 
     // ========================================
     // 1) Reset Triggers & Button Handling
     // ========================================
+
+    // Initialize channel data array
+    uint16_t local_channel_data[16] = {0};
 
 #if defined(HAS_APDS9960)
     // Reset Center on Proximity detection
@@ -521,7 +514,7 @@ void main_Thread()
     }
 #endif
 
-    // --- Button press handling ---
+    // Button press handling
     
     static float pulsetimer = 0;
     static bool sendingresetpulse = false;
@@ -584,7 +577,7 @@ void main_Thread()
     }
     lastbutmode = buttonpresmode;
 
-    // --- Reset on tilt detection ---
+    // Reset on tilt detection
     
     static bool doresetontilt = false;
     if (trkset.getRstOnTlt()) {
@@ -596,7 +589,7 @@ void main_Thread()
         HITMAX,
       };
       static int minmax = HITNONE;
-      if (rollout_ui_shared == trkset.getRll_Max()) {
+      if (roll_ui == trkset.getRll_Max()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMAX;
@@ -606,7 +599,7 @@ void main_Thread()
           doresetontilt = true;
         }
 
-      } else if (rollout_ui_shared == trkset.getRll_Min()) {
+      } else if (roll_ui == trkset.getRll_Min()) {
         if (tiltpeak == false && minmax == HITNONE) {
           tiltpeak = true;
           minmax = HITMIN;
@@ -642,7 +635,7 @@ void main_Thread()
     // ========================================
     // 2) Read PPM Input Channels
     // ========================================
-    
+
     PpmIn_execute();
     for (int i = 0; i < 16; i++)
       ppm_in_chans[i] = 0;
@@ -698,8 +691,19 @@ void main_Thread()
     int aux0ch = trkset.getAux0Ch();
     int aux1ch = trkset.getAux1Ch();
     int aux2ch = trkset.getAux2Ch();
+    float auxdata[8];
     if (aux0ch > 0 || aux1ch > 0 || aux2ch > 0) {
-      buildAuxData();
+      float pwmrange = (TrackerSettings::MAX_PWM - TrackerSettings::MIN_PWM);
+      auxdata[TrackerSettings::AUX_GYRX] = (gyr.x / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_GYRY] = (gyr.y / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_GYRZ] = (gyr.z / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_ACCELX] = (acc.x / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_ACCELY] = (acc.y / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_ACCELZ] = (acc.z / 1.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::AUX_ACCELZO] = ((acc.z - 1.0f) / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
+      auxdata[TrackerSettings::BT_RSSI] =
+          static_cast<float>(BTGetRSSI()) / 127.0f * pwmrange + TrackerSettings::MIN_PWM;
+
       assign_channel(local_channel_data, aux0ch, auxdata[trkset.getAux0Func()]);
       assign_channel(local_channel_data, aux1ch, auxdata[trkset.getAux1Func()]);
       assign_channel(local_channel_data, aux2ch, auxdata[trkset.getAux2Func()]);
@@ -751,15 +755,16 @@ void main_Thread()
     // 8) Merge TRP Data from TRP Thread
     // ========================================
     
-    // Note: For CRSF fast mode, TRP is written directly by TRP thread to channel_data
-    // This message queue path is for non-time-critical outputs (PPM, BT, PWM, Joystick)
-    trp_update_t trp_data;
-    if (k_msgq_get(&trp_msgq, &trp_data, K_NO_WAIT) == 0) {
-        assign_channel(local_channel_data, trp_data.tilt_ch, trp_data.tilt_val);
-        assign_channel(local_channel_data, trp_data.roll_ch, trp_data.roll_val);
-        assign_channel(local_channel_data, trp_data.pan_ch, trp_data.pan_val);
-        assign_channel(local_channel_data, CRSF_ACTUAL_RATE_CHANNEL, trp_data.actual_rate);
-    }
+    // Get channel assignments
+    int tilt_ch = trkset.getTltCh();
+    int roll_ch = trkset.getRllCh();
+    int pan_ch = trkset.getPanCh();
+    
+    // Assign to local channel data
+    assign_channel(local_channel_data, tilt_ch, tilt_val);
+    assign_channel(local_channel_data, roll_ch, roll_val);
+    assign_channel(local_channel_data, pan_ch, pan_val);
+    assign_channel(local_channel_data, CRSF_ACTUAL_RATE_CHANNEL, actual_rate);
 
     // For non-CRSF modes: Copy non-TRP channels to channel_data (centering zeros)
     // For CRSF mode: TRP channels already written by TRP thread, we just handle other channels
@@ -830,39 +835,8 @@ void main_Thread()
     // Update GUI Data
     // ========================================
     
-    // Get latest sensor data from TRP thread
-    sensor_data_t sensor_snapshot = {0};
-    k_sched_lock();
-    sensor_snapshot = shared_sensor_data;
-    k_sched_unlock();
-
     // Update GUI data (only if we can get the lock)
     if (k_mutex_lock(&data_mutex, K_NO_WAIT) == 0) {
-      // Raw values for calibration
-      trkset.setDataAccX(sensor_snapshot.raw_acc.x);
-      trkset.setDataAccY(sensor_snapshot.raw_acc.y);
-      trkset.setDataAccZ(sensor_snapshot.raw_acc.z);
-
-      trkset.setDataGyroX(sensor_snapshot.raw_gyr.x);
-      trkset.setDataGyroY(sensor_snapshot.raw_gyr.y);
-      trkset.setDataGyroZ(sensor_snapshot.raw_gyr.z);
-
-      trkset.setDataMagX(sensor_snapshot.raw_mag.x);
-      trkset.setDataMagY(sensor_snapshot.raw_mag.y);
-      trkset.setDataMagZ(sensor_snapshot.raw_mag.z);
-
-      trkset.setDataOff_AccX(sensor_snapshot.acc.x);
-      trkset.setDataOff_AccY(sensor_snapshot.acc.y);
-      trkset.setDataOff_AccZ(sensor_snapshot.acc.z);
-
-      trkset.setDataOff_GyroX(sensor_snapshot.gyr.x);
-      trkset.setDataOff_GyroY(sensor_snapshot.gyr.y);
-      trkset.setDataOff_GyroZ(sensor_snapshot.gyr.z);
-
-      trkset.setDataOff_MagX(sensor_snapshot.mag.x);
-      trkset.setDataOff_MagY(sensor_snapshot.mag.y);
-      trkset.setDataOff_MagZ(sensor_snapshot.mag.z);
-
       // PPM Input Values
       trkset.setDataPpmCh(ppm_in_chans);
       trkset.setDataBtCh(bt_chans);
@@ -871,10 +845,6 @@ void main_Thread()
 
       trkset.setDataTrpEnabled(trpOutputEnabled);
       trkset.setDataGyroCal(gyroCalibrated);
-
-      // Quaternion Data
-      float *qd = madgwick.getQuat();
-      trkset.setDataQuat(qd);
 
       // Bluetooth connected
       trkset.setDataBtCon(bleconnected);
@@ -917,6 +887,8 @@ void main_Thread()
 void trp_Thread()
 {
   LOG_INF("TRP Thread Loaded");
+  
+  int64_t senseUsDuration = 0;
   
   // Thread-local state
   axis_t racc = {{0, 0, 0}};
@@ -1132,16 +1104,10 @@ void trp_Thread()
     }
 
     // Update shared sensor data for channel thread (no lock needed - TRP has higher priority)
-    shared_sensor_data.acc = acc;
-    shared_sensor_data.gyr = gyr;
-    shared_sensor_data.mag = mag;
-    shared_sensor_data.raw_acc = racc;
-    shared_sensor_data.raw_gyr = rgyr;
-    shared_sensor_data.raw_mag = rmag;
-    shared_sensor_data.acc_valid = accValid;
-    shared_sensor_data.gyr_valid = gyrValid;
-    shared_sensor_data.mag_valid = magValid;
-    shared_sensor_data.timestamp = micros64();
+    shared_thread_data.acc = acc;
+    shared_thread_data.gyr = gyr;
+    shared_thread_data.raw_acc = racc;
+    shared_thread_data.raw_gyr = rgyr;
 
     // Run Gyro Calibration, only on good gyro data
     if (gyrValid) {
@@ -1231,41 +1197,18 @@ void trp_Thread()
     uint16_t rate_channel_val = crsfActualRate / 2 + 1500;
 
     // CRITICAL FAST PATH: Write TRP directly to shared channel_data for minimum latency
-    // This bypasses message queues and channel thread for time-critical UART output
+    // This bypasses message queues and main thread for time-critical UART output
     if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = final_tilt;
     if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = final_roll;
     if (panch > 0 && panch <= 16) channel_data[panch - 1] = final_pan;
     channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = rate_channel_val;
 
-    // Also send to channel thread for non-time-critical outputs (PPM, BT, PWM, Joystick)
-    // This allows channel thread to merge TRP with other channel sources
-    trp_update_t trp_update = {
-        .tilt_ch = tltch,
-        .roll_ch = rllch,
-        .pan_ch = panch,
-        .tilt_val = final_tilt,
-        .roll_val = final_roll,
-        .pan_val = final_pan,
-        .actual_rate = rate_channel_val,
-        .enabled = trpOutputEnabled
-    };
-    k_msgq_put(&trp_msgq, &trp_update, K_NO_WAIT);
-
-    // Update shared variables for legacy compatibility
-    rollout_ui_shared = rollout_ui;
-    
-    // Update GUI orientation data
-    trkset.setDataTilt(tilt);
-    trkset.setDataRoll(roll);
-    trkset.setDataPan(pan);
-
-    trkset.setDataTiltOff(tilt - tiltoffset);
-    trkset.setDataRollOff(roll - rolloffset);
-    trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
-
-    trkset.setDataTiltOut(tiltout_ui);
-    trkset.setDataRollOut(rollout_ui);
-    trkset.setDataPanOut(panout_ui);
+    // Update shared TRP output for main thread (no lock needed - TRP has higher priority)
+    shared_thread_data.tilt_val = final_tilt;
+    shared_thread_data.roll_val = final_roll;
+    shared_thread_data.pan_val = final_pan;
+    shared_thread_data.roll_ui = rollout_ui;
+    shared_thread_data.actual_rate = rate_channel_val;
 
     // CRITICAL FAST PATH: CRSF output directly from TRP thread for minimum latency
     // No message queues, no waiting for channel thread
@@ -1276,6 +1219,52 @@ void trp_Thread()
 
       // FAST PATH: Use channel_data directly (already has TRP values written above)
       UartSetChannels(channel_data);
+    }
+
+    // Update GUI data (only if we can get the lock)
+    if (k_mutex_lock(&data_mutex, K_NO_WAIT) == 0) {
+      // Raw values for calibration
+      trkset.setDataAccX(racc.x);
+      trkset.setDataAccY(racc.y);
+      trkset.setDataAccZ(racc.z);
+
+      trkset.setDataGyroX(rgyr.x);
+      trkset.setDataGyroY(rgyr.y);
+      trkset.setDataGyroZ(rgyr.z);
+
+      trkset.setDataMagX(rmag.x);
+      trkset.setDataMagY(rmag.y);
+      trkset.setDataMagZ(rmag.z);
+
+      trkset.setDataOff_AccX(acc.x);
+      trkset.setDataOff_AccY(acc.y);
+      trkset.setDataOff_AccZ(acc.z);
+
+      trkset.setDataOff_GyroX(gyr.x);
+      trkset.setDataOff_GyroY(gyr.y);
+      trkset.setDataOff_GyroZ(gyr.z);
+
+      trkset.setDataOff_MagX(mag.x);
+      trkset.setDataOff_MagY(mag.y);
+      trkset.setDataOff_MagZ(mag.z);
+
+      // Orientation data
+      trkset.setDataTilt(tilt);
+      trkset.setDataRoll(roll);
+      trkset.setDataPan(pan);
+
+      trkset.setDataTiltOff(tilt - tiltoffset);
+      trkset.setDataRollOff(roll - rolloffset);
+      trkset.setDataPanOff(normalize(pan - panoffset, -180, 180));
+
+      trkset.setDataTiltOut(tiltout_ui);
+      trkset.setDataRollOut(rollout_ui);
+      trkset.setDataPanOut(panout_ui);
+
+      float *qd = madgwick.getQuat();
+      trkset.setDataQuat(qd);
+
+      k_mutex_unlock(&data_mutex);
     }
 
     // Adjust sleep for a more accurate period
@@ -1304,7 +1293,7 @@ void detectDoubleTap()
   // Get sensor data from shared state
   axis_t local_racc;
   k_sched_lock();
-  local_racc = shared_sensor_data.raw_acc;
+  local_racc = shared_thread_data.raw_acc;
   k_sched_unlock();
   
   static float last_acc_mag = 0;
@@ -1339,8 +1328,8 @@ void detectDoubleTap()
 void gyroCalibrate()
 {
   // Get sensor data from shared state (no lock needed - TRP has higher priority)
-  axis_t local_rgyr = shared_sensor_data.raw_gyr;
-  axis_t local_racc = shared_sensor_data.raw_acc;
+  axis_t local_rgyr = shared_thread_data.raw_gyr;
+  axis_t local_racc = shared_thread_data.raw_acc;
   
   static float last_gyro_mag = 0;
   static float last_acc_mag = 0;
@@ -1492,29 +1481,4 @@ void reset_fusion()
   aacc = (axis_t){{0, 0, 0}};
   amag = (axis_t){{0, 0, 0}};
   LOG_INF("Resetting fusion algorithm");
-}
-
-/* Builds data for auxiliary functions
- */
-
-void buildAuxData()
-{
-  // Get sensor data from shared state
-  axis_t local_gyr, local_acc;
-  k_sched_lock();
-  local_gyr = shared_sensor_data.gyr;
-  local_acc = shared_sensor_data.acc;
-  k_sched_unlock();
-  
-  float pwmrange = (TrackerSettings::MAX_PWM - TrackerSettings::MIN_PWM);
-  auxdata[TrackerSettings::AUX_GYRX] = (local_gyr.x / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_GYRY] = (local_gyr.y / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_GYRZ] = (local_gyr.z / 1000) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELX] = (local_acc.x / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELY] = (local_acc.y / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELZ] = (local_acc.z / 1.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::AUX_ACCELZO] =
-      ((local_acc.z - 1.0f) / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-  auxdata[TrackerSettings::BT_RSSI] =
-      static_cast<float>(BTGetRSSI()) / 127.0f * pwmrange + TrackerSettings::MIN_PWM;
 }
