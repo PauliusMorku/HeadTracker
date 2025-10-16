@@ -17,25 +17,42 @@ def put_in_bootloader(port_name):
     
     try:
         # Custom bootloader command (HeadTracker firmware specific)
-        try:
-            port = serial.Serial(port_name, 1200, timeout=1)
-            port.rts = True
-            port.dtr = False
-            bootcmd = b'\x02{"Cmd":"Boot"}\xDA\x0c\x03\r\n'
-            port.write(bootcmd)
-            port.flush()
+        port = serial.Serial(port_name, 1200, timeout=1)
+        port.rts = True
+        port.dtr = False
+        
+        bootcmd = b'\x02{"Cmd":"Boot"}\xDA\x0c\x03\r\n'
+        bytes_written = port.write(bootcmd)
+        
+        # Verify the command was actually written
+        if bytes_written != len(bootcmd):
             port.close()
-            time.sleep(1)
-        except:
-            pass
+            raise IOError(f"Failed to write complete command")
+        
+        port.flush()
+        
+        # Give device a moment to process command before closing
+        time.sleep(0.1)
+        port.close()
+        
+        # Wait for device to reboot into bootloader
+        time.sleep(1)
         
         return True
         
     except serial.SerialException as e:
-        print(f"Error: Could not access port {port_name}: {e}")
+        error_str = str(e).lower()
+        if "no such file" in error_str or "not find" in error_str:
+            print(f"Error: Device not found at {port_name}")
+        elif "permission denied" in error_str:
+            print(f"Error: Permission denied for {port_name}")
+        elif "already open" in error_str or "in use" in error_str:
+            print(f"Error: Port {port_name} is already in use")
+        else:
+            print(f"Error: Could not access {port_name}")
         return False
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print(f"Error: {e}")
         return False
 
 def main():
