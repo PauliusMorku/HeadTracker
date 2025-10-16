@@ -101,38 +101,6 @@ typedef struct {
 } shared_thread_data_t;  // Shared between TRP and main threads
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-void gyroCalibrate();
-void detectDoubleTap();
-
-inline float magnitude(const axis_t& v) {
-  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
-inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
-  return MAX(MIN((uint16_t)value, max_val), min_val);
-}
-
-static inline bool assign_channel(uint16_t* channels, int channel, uint16_t value) {
-    if (channel > 0 && channel <= 16) {
-        channels[channel - 1] = value;
-        return true;
-    }
-    return false;
-}
-
-static inline void processAnalogChannel(uint16_t* channels, int ch, float rawAnalog, float gain, float offset, int filterIndex) {
-  float filtered = SF1eFilterDo(anFilter[filterIndex], rawAnalog);
-  filtered *= gain;
-  filtered += offset;
-  filtered += TrackerSettings::MIN_PWM;
-  filtered = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, filtered));
-  assign_channel(channels, ch, filtered);
-}
-
-// ============================================================================
 // Shared State
 // ============================================================================
 
@@ -156,8 +124,6 @@ static float bt_chansf[TrackerSettings::BT_CHANNELS];
 static uint16_t channel_data[16];
 
 Madgwick madgwick;
-
-const struct device *i2c_dev = nullptr;
 
 static bool hasAcc = false;
 static bool hasGyr = false;
@@ -214,6 +180,40 @@ struct k_poll_event channelRunEvents[1] = {
     K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY,
                              &channelThreadRunSignal),
 };
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+void gyroCalibrate();
+void detectDoubleTap();
+void readSensors(axis_t& tacc, axis_t& tgyr, axis_t& tmag, bool& accValid, bool& gyrValid, bool& magValid);
+
+inline float magnitude(const axis_t& v) {
+  return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+inline uint16_t clamp_channel(float value, uint16_t min_val, uint16_t max_val) {
+  return MAX(MIN((uint16_t)value, max_val), min_val);
+}
+
+static inline bool assign_channel(uint16_t* channels, int channel, uint16_t value) {
+    if (channel > 0 && channel <= 16) {
+        channels[channel - 1] = value;
+        return true;
+    }
+    return false;
+}
+
+static inline void processAnalogChannel(uint16_t* channels, int ch, float rawAnalog, float gain, float offset, int filterIndex) {
+  float filtered = SF1eFilterDo(anFilter[filterIndex], rawAnalog);
+  filtered *= gain;
+  filtered += offset;
+  filtered += TrackerSettings::MIN_PWM;
+  filtered = MAX(TrackerSettings::MIN_PWM, MIN(TrackerSettings::MAX_PWM, filtered));
+  assign_channel(channels, ch, filtered);
+}
+
 
 int sense_Init()
 {
@@ -919,133 +919,7 @@ void trp_Thread()
     bool gyrValid = false;
     bool magValid = false;
 
-#if defined(HAS_LSM9DS1)
-    if (IMU.accelerationAvailable()) {
-      IMU.readRawAccel(tacc.x, tacc.y, tacc.z);
-      tacc.x *= -1.0f;  // Flip X
-      accValid = true;
-    }
-    if (IMU.magneticFieldAvailable()) {
-      IMU.readRawMagnet(tmag.x, tmag.y, tmag.z);
-      magValid = true;
-    }
-    if (IMU.gyroscopeAvailable()) {
-      IMU.readRawGyro(tgyr.x, tgyr.y, tgyr.z);
-      tgyr.x *= -1.0f;  // Flip X to match other sensors
-      gyrValid = true;
-    }
-#endif
-
-#if defined(HAS_BMI270)
-    int8_t rslt;
-    uint16_t int_status = 0;
-    struct bmi2_sens_data sensor_data = {{0}};
-    rslt = bmi2_get_int_status(&int_status, &bmi2_dev);
-    bmi2_error_codes_print_result(rslt);
-    /* To check the data ready interrupt status and print the status for 10 samples. */
-    if ((int_status & BMI2_ACC_DRDY_INT_MASK) && (int_status & BMI2_GYR_DRDY_INT_MASK)) {
-      /* Get accel and gyro data for x, y and z axis. */
-      rslt = bmi2_get_sensor_data(&sensor_data, &bmi2_dev);
-      bmi2_error_codes_print_result(rslt);
-
-      /* Converting lsb to meter per second squared for 16 bit accelerometer at 2G range. */
-      tacc.x = lsb_to_mps2(sensor_data.acc.y, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      tacc.y = -1.0f * lsb_to_mps2(sensor_data.acc.x, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      tacc.z = lsb_to_mps2(sensor_data.acc.z, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
-      // printk("\nAccX=%4.2f,Y=%4.2f,Z=%4.2f\n", tacc.x, tacc.y, tacc.z);
-      /* Converting lsb to degree per second for 16 bit gyro at 2000dps range. */
-
-      tgyr.x = lsb_to_dps(sensor_data.gyr.y, 2000, bmi2_dev.resolution);
-      tgyr.y = -1.0f * lsb_to_dps(sensor_data.gyr.x, 2000, bmi2_dev.resolution);
-      tgyr.z = lsb_to_dps(sensor_data.gyr.z, 2000, bmi2_dev.resolution);
-      // printk("GyrX=%4.2f,Y=%4.2f,Z=%4.2f\n", tgyr.x, tgyr.y, tgyr.z);
-      accValid = true;
-      gyrValid = true;
-    }
-#endif
-
-#if defined(HAS_BMM150)
-    if(hasMag) {
-      int8_t rbslt;
-      uint8_t data_ready = 0;
-      rslt = bmm150_get_regs(BMM150_REG_DATA_READY_STATUS, &data_ready, 1, &bmm1_dev);
-      if(rslt == BMM150_OK) {
-        if(data_ready & 0x01) {
-          struct bmm150_mag_data mag_data;
-          rbslt = bmm150_read_mag_data(&mag_data, &bmm1_dev);
-          if (rbslt != BMM150_OK) {
-            bmm150_error_codes_print_result("bmm150_read_mag_data", rbslt);
-          } else {
-            tmag.x = mag_data.y;
-            tmag.y = mag_data.x;
-            tmag.z = mag_data.z;
-            magValid = true;
-          }
-        }
-      } else {
-        bmm150_error_codes_print_result("bmm150_get_regs", rslt);
-      }
-    }
-#endif
-
-#if defined(HAS_LSM6DS3)
-    int16_t data_raw_acceleration[3];
-    int16_t data_raw_angular_rate[3];
-    lsm6ds3tr_c_reg_t reg;
-    lsm6ds3tr_c_status_reg_get(&dev_ctx, &reg.status_reg);
-    if (reg.status_reg.xlda) {
-      /* Read acceleration data */
-      memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
-      lsm6ds3tr_c_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-      tacc.x = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[0]) / 1000.0f;
-      tacc.y = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[1]) / 1000.0f;
-      tacc.z = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[2]) / 1000.0f;
-      accValid = true;
-    }
-    if (reg.status_reg.gda) {
-      memset(data_raw_angular_rate, 0x00, 3 * sizeof(int16_t));
-      lsm6ds3tr_c_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
-      tgyr.x = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[0]) / 1000.0f;
-      tgyr.y = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[1]) / 1000.0f;
-      tgyr.z = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[2]) / 1000.0f;
-      gyrValid = true;
-    }
-
-#endif
-
-#if defined(HAS_QMC5883)
-    if(hasMag) {
-      if (qmc5883Read(tmag.data)) {
-        magValid = true;
-      }
-    }
-#endif
-
-#if defined(HAS_MPU6500)
-    // Read MPU6500
-    short _gyro[3];
-    short _accel[3];
-    if (!mpu_get_accel_reg(_accel, nullptr)) accValid = true;
-    unsigned short ascale = 1;
-    mpu_get_accel_sens(&ascale);
-    tacc.x = (float)_accel[0] / (float)ascale;
-    tacc.y = (float)_accel[1] / (float)ascale;
-    tacc.z = (float)_accel[2] / (float)ascale;
-    if (!mpu_get_gyro_reg(_gyro, nullptr)) gyrValid = true;
-    float gscale = 1.0f;
-    mpu_get_gyro_sens(&gscale);
-    tgyr.x = _gyro[0] / gscale;
-    tgyr.y = _gyro[1] / gscale;
-    tgyr.z = _gyro[2] / gscale;
-#endif
-
-#if defined(HAS_MPU6886)
-    if(!mpu6886.getAccelData(&tacc.x, &tacc.y, &tacc.z))
-      accValid = true;
-    if(!mpu6886.getGyroData(&tgyr.x, &tgyr.y, &tgyr.z)) {
-      gyrValid = true;
-    }
-#endif
+    readSensors(tacc, tgyr, tmag, accValid, gyrValid, magValid);
 
     // -- Accelerometer
     if (accValid) {
@@ -1467,6 +1341,136 @@ void rotate(float pn[3], const float rotation[3])
   out[1] = pn[0] * sin_rot[2] + pn[1] * cos_rot[2];
   out[2] = pn[2];
   pn[0] = out[0]; pn[1] = out[1]; pn[2] = out[2];
+}
+
+void readSensors(axis_t& tacc, axis_t& tgyr, axis_t& tmag, bool& accValid, bool& gyrValid, bool& magValid) {
+#if defined(HAS_LSM9DS1)
+    if (IMU.accelerationAvailable()) {
+      IMU.readRawAccel(tacc.x, tacc.y, tacc.z);
+      tacc.x *= -1.0f;  // Flip X
+      accValid = true;
+    }
+    if (IMU.magneticFieldAvailable()) {
+      IMU.readRawMagnet(tmag.x, tmag.y, tmag.z);
+      magValid = true;
+    }
+    if (IMU.gyroscopeAvailable()) {
+      IMU.readRawGyro(tgyr.x, tgyr.y, tgyr.z);
+      tgyr.x *= -1.0f;  // Flip X to match other sensors
+      gyrValid = true;
+    }
+#endif
+
+#if defined(HAS_BMI270)
+    int8_t rslt;
+    uint16_t int_status = 0;
+    struct bmi2_sens_data sensor_data = {{0}};
+    rslt = bmi2_get_int_status(&int_status, &bmi2_dev);
+    bmi2_error_codes_print_result(rslt);
+    /* To check the data ready interrupt status and print the status for 10 samples. */
+    if ((int_status & BMI2_ACC_DRDY_INT_MASK) && (int_status & BMI2_GYR_DRDY_INT_MASK)) {
+      /* Get accel and gyro data for x, y and z axis. */
+      rslt = bmi2_get_sensor_data(&sensor_data, &bmi2_dev);
+      bmi2_error_codes_print_result(rslt);
+
+      /* Converting lsb to meter per second squared for 16 bit accelerometer at 2G range. */
+      tacc.x = lsb_to_mps2(sensor_data.acc.y, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      tacc.y = -1.0f * lsb_to_mps2(sensor_data.acc.x, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      tacc.z = lsb_to_mps2(sensor_data.acc.z, 2, bmi2_dev.resolution) / GRAVITY_EARTH;
+      // printk("\nAccX=%4.2f,Y=%4.2f,Z=%4.2f\n", tacc.x, tacc.y, tacc.z);
+      /* Converting lsb to degree per second for 16 bit gyro at 2000dps range. */
+
+      tgyr.x = lsb_to_dps(sensor_data.gyr.y, 2000, bmi2_dev.resolution);
+      tgyr.y = -1.0f * lsb_to_dps(sensor_data.gyr.x, 2000, bmi2_dev.resolution);
+      tgyr.z = lsb_to_dps(sensor_data.gyr.z, 2000, bmi2_dev.resolution);
+      // printk("GyrX=%4.2f,Y=%4.2f,Z=%4.2f\n", tgyr.x, tgyr.y, tgyr.z);
+      accValid = true;
+      gyrValid = true;
+    }
+#endif
+
+#if defined(HAS_BMM150)
+    if(hasMag) {
+      int8_t rbslt;
+      uint8_t data_ready = 0;
+      rslt = bmm150_get_regs(BMM150_REG_DATA_READY_STATUS, &data_ready, 1, &bmm1_dev);
+      if(rslt == BMM150_OK) {
+        if(data_ready & 0x01) {
+          struct bmm150_mag_data mag_data;
+          rbslt = bmm150_read_mag_data(&mag_data, &bmm1_dev);
+          if (rbslt != BMM150_OK) {
+            bmm150_error_codes_print_result("bmm150_read_mag_data", rbslt);
+          } else {
+            tmag.x = mag_data.y;
+            tmag.y = mag_data.x;
+            tmag.z = mag_data.z;
+            magValid = true;
+          }
+        }
+      } else {
+        bmm150_error_codes_print_result("bmm150_get_regs", rslt);
+      }
+    }
+#endif
+
+#if defined(HAS_LSM6DS3)
+    int16_t data_raw_acceleration[3];
+    int16_t data_raw_angular_rate[3];
+    lsm6ds3tr_c_reg_t reg;
+    lsm6ds3tr_c_status_reg_get(&dev_ctx, &reg.status_reg);
+    if (reg.status_reg.xlda) {
+      /* Read acceleration data */
+      memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+      lsm6ds3tr_c_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+      tacc.x = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[0]) / 1000.0f;
+      tacc.y = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[1]) / 1000.0f;
+      tacc.z = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[2]) / 1000.0f;
+      accValid = true;
+    }
+    if (reg.status_reg.gda) {
+      memset(data_raw_angular_rate, 0x00, 3 * sizeof(int16_t));
+      lsm6ds3tr_c_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate);
+      tgyr.x = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[0]) / 1000.0f;
+      tgyr.y = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[1]) / 1000.0f;
+      tgyr.z = (float)lsm6ds3tr_c_from_fs2000dps_to_mdps(data_raw_angular_rate[2]) / 1000.0f;
+      gyrValid = true;
+    }
+
+#endif
+
+#if defined(HAS_QMC5883)
+    if(hasMag) {
+      if (qmc5883Read(tmag.data)) {
+        magValid = true;
+      }
+    }
+#endif
+
+#if defined(HAS_MPU6500)
+    // Read MPU6500
+    short _gyro[3];
+    short _accel[3];
+    if (!mpu_get_accel_reg(_accel, nullptr)) accValid = true;
+    unsigned short ascale = 1;
+    mpu_get_accel_sens(&ascale);
+    tacc.x = (float)_accel[0] / (float)ascale;
+    tacc.y = (float)_accel[1] / (float)ascale;
+    tacc.z = (float)_accel[2] / (float)ascale;
+    if (!mpu_get_gyro_reg(_gyro, nullptr)) gyrValid = true;
+    float gscale = 1.0f;
+    mpu_get_gyro_sens(&gscale);
+    tgyr.x = _gyro[0] / gscale;
+    tgyr.y = _gyro[1] / gscale;
+    tgyr.z = _gyro[2] / gscale;
+#endif
+
+#if defined(HAS_MPU6886)
+    if(!mpu6886.getAccelData(&tacc.x, &tacc.y, &tacc.z))
+      accValid = true;
+    if(!mpu6886.getGyroData(&tgyr.x, &tgyr.y, &tgyr.z)) {
+      gyrValid = true;
+    }
+#endif
 }
 
 /* reset_fusion()
