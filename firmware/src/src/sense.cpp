@@ -66,6 +66,7 @@
 #endif
 
 #define CRSF_ACTUAL_RATE_CHANNEL 12  // Channel for displaying actual CRSF transmission rate in OSD
+#define DAMPENING_SELECTION_CHANNEL 7 // Dampening selection channel is also used for tilt when TRP disabled
 
 #define PROXIMITY_UPDATE_INTERVAL 10  // Proximity sensor update interval in main thread cycles
 
@@ -111,7 +112,7 @@ static shared_thread_data_t shared_thread_data;
 static volatile bool recenter_requested = false;
 
 // Thread-shared output state
-static volatile bool trpOutputEnabled = false;
+static volatile bool trpOutputEnabled = true;
 static volatile bool gyroCalibrated = false;
 
 // Input Channel Data (used across main thread functions)
@@ -567,7 +568,7 @@ void main_Thread()
     }
 
     // Handle TRP output enable/disable based on long press mode setting
-    static bool lastbutmode = false;
+    static bool lastbutmode = true;
     bool buttonpresmode = trkset.getButLngPs();
     if (!buttonpresmode) {
         // Long press mode disabled - TRP always enabled
@@ -702,8 +703,7 @@ void main_Thread()
       auxdata[TrackerSettings::AUX_ACCELY] = (acc.y / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
       auxdata[TrackerSettings::AUX_ACCELZ] = (acc.z / 1.0f) * pwmrange + TrackerSettings::PPM_CENTER;
       auxdata[TrackerSettings::AUX_ACCELZO] = ((acc.z - 1.0f) / 2.0f) * pwmrange + TrackerSettings::PPM_CENTER;
-      auxdata[TrackerSettings::BT_RSSI] =
-          static_cast<float>(BTGetRSSI()) / 127.0f * pwmrange + TrackerSettings::MIN_PWM;
+      auxdata[TrackerSettings::BT_RSSI] = static_cast<float>(BTGetRSSI()) / 127.0f * pwmrange + TrackerSettings::MIN_PWM;
 
       assign_channel(local_channel_data, aux0ch, auxdata[trkset.getAux0Func()]);
       assign_channel(local_channel_data, aux1ch, auxdata[trkset.getAux1Func()]);
@@ -741,6 +741,29 @@ void main_Thread()
     }
 #endif
 
+    // Apply dual-purpose dial logic
+    static uint16_t last_dampening_value = TrackerSettings::PPM_CENTER;
+    static bool last_trp_state = true;
+
+    // Detect transition from enabled to disabled - capture dampening value
+    if (last_trp_state && !trpOutputEnabled) {
+      last_dampening_value = local_channel_data[DAMPENING_SELECTION_CHANNEL - 1];
+    }
+    last_trp_state = trpOutputEnabled;
+
+    if (!trpOutputEnabled) {
+      // TRP disabled: dial directly controls actual tilt channel
+      uint16_t dial_value = local_channel_data[DAMPENING_SELECTION_CHANNEL - 1];
+      int tilt_ch = trkset.getTltCh();
+      
+      if (tilt_ch > 0 && tilt_ch <= 16) {
+        local_channel_data[tilt_ch - 1] = dial_value;
+      }
+      
+      // Freeze dampening channel at last value
+      assign_channel(local_channel_data, DAMPENING_SELECTION_CHANNEL, last_dampening_value);
+    }
+
     // ========================================
     // 8) Configure UART Output
     // ========================================
@@ -762,7 +785,9 @@ void main_Thread()
     int pan_ch = trkset.getPanCh();
     
     // Assign to local channel data
-    assign_channel(local_channel_data, tilt_ch, tilt_val);
+    if (trpOutputEnabled) {
+      assign_channel(local_channel_data, tilt_ch, tilt_val);
+    }
     assign_channel(local_channel_data, roll_ch, roll_val);
     assign_channel(local_channel_data, pan_ch, pan_val);
     assign_channel(local_channel_data, CRSF_ACTUAL_RATE_CHANNEL, actual_rate);
@@ -776,8 +801,14 @@ void main_Thread()
 
     k_sched_lock();
     for (int i = 0; i < 16; i++) {
-        // Skip TRP channels and actual rate channel - TRP thread owns these for CRSF fast path
-        if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
+        // Determine which channels to skip
+        // Only skip tilt if TRP enabled - when disabled, main thread controls it via dial
+        bool skip_tilt = (i == tlti) && trpOutputEnabled;
+        bool skip_roll = (i == rlli);
+        bool skip_pan = (i == pani);
+        bool skip_rate = (i == CRSF_ACTUAL_RATE_CHANNEL - 1);
+        
+        if (skip_tilt || skip_roll || skip_pan || skip_rate) {
             continue;
         }
         
@@ -1064,7 +1095,8 @@ void trp_Thread()
     int8_t rllch = trkset.getRllCh();
     int8_t panch = trkset.getPanCh();
     
-    uint16_t final_tilt = trpOutputEnabled ? tiltout_ui : trkset.getTlt_Cnt();
+    // When TRP disabled, main thread controls tilt channel via dial
+    uint16_t final_tilt = trpOutputEnabled ? tiltout_ui : channel_data[tltch - 1];
     uint16_t final_roll = trpOutputEnabled ? rollout_ui : trkset.getRll_Cnt();
     uint16_t final_pan = trpOutputEnabled ? panout_ui : trkset.getPan_Cnt();
 
