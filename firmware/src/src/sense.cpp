@@ -119,15 +119,8 @@ typedef struct {
     bool enabled;
 } trp_update_t;
 
-typedef struct {
-    bool short_press;
-    bool long_press;
-} button_event_t;
-
 // Message queues for inter-thread communication
-K_MSGQ_DEFINE(sensor_msgq, sizeof(sensor_data_t), 2, 4);
 K_MSGQ_DEFINE(trp_msgq, sizeof(trp_update_t), 2, 4);
-K_MSGQ_DEFINE(button_msgq, sizeof(button_event_t), 4, 4);
 
 // ============================================================================
 // Helper Functions
@@ -165,9 +158,11 @@ static inline void processAnalogChannel(uint16_t* channels, int ch, float rawAna
 // Shared State (Minimized)
 // ============================================================================
 
-// Thread-shared sensor data (populated by sensor thread, read by calculate thread)
+// Thread-shared sensor data (populated by TRP thread, read by channel thread)
 static sensor_data_t shared_sensor_data;
-static K_MUTEX_DEFINE(sensor_data_mutex);
+
+// Recenter request flag - set by channel thread, cleared by TRP thread
+static volatile bool recenter_requested = false;
 
 // Thread-shared output state
 static volatile uint16_t rollout_ui_shared = 0;
@@ -237,16 +232,16 @@ static volatile bool firstrun = true;
 static axis_t aacc = {{0, 0, 0}};
 static axis_t amag = {{0, 0, 0}};
 
-static struct k_poll_signal senseThreadRunSignal = K_POLL_SIGNAL_INITIALIZER(senseThreadRunSignal);
-struct k_poll_event senseRunEvents[1] = {
-    K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &senseThreadRunSignal),
+static struct k_poll_signal trpThreadRunSignal = K_POLL_SIGNAL_INITIALIZER(trpThreadRunSignal);
+struct k_poll_event trpRunEvents[1] = {
+    K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &trpThreadRunSignal),
 };
 
-static struct k_poll_signal calculateThreadRunSignal =
-    K_POLL_SIGNAL_INITIALIZER(calculateThreadRunSignal);
-struct k_poll_event calculateRunEvents[1] = {
+static struct k_poll_signal channelThreadRunSignal =
+    K_POLL_SIGNAL_INITIALIZER(channelThreadRunSignal);
+struct k_poll_event channelRunEvents[1] = {
     K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY,
-                             &calculateThreadRunSignal),
+                             &channelThreadRunSignal),
 };
 
 int sense_Init()
@@ -437,27 +432,29 @@ int sense_Init()
   anVoltFilter = SF1eFilterCreate(AN_FILT_FREQ, AN_FILT_MINCO, AN_FILT_SLOPE, AN_FILT_DERCO);
   SF1eFilterInit(anVoltFilter);
 
-  // Start reading the IMU sensors + fusion algorithm
-  k_poll_signal_raise(&senseThreadRunSignal, 1);
-  LOG_INF("Sense Thread Signal Raised");
+  // Start TRP calculation thread (sensor fusion + UART output critical path)
+  k_poll_signal_raise(&trpThreadRunSignal, 1);
+  LOG_INF("TRP Thread Signal Raised");
 
-  // Start doing the other calculations
-  k_poll_signal_raise(&calculateThreadRunSignal, 1);
-  LOG_INF("Calculate Thread Signal Raised");
+  // Start channel management thread (all other I/O and channel processing)
+  k_poll_signal_raise(&channelThreadRunSignal, 1);
+  LOG_INF("Channel Thread Signal Raised");
 
   return 0;
 }
 
 //----------------------------------------------------------------------
-// Calculations and Main Channel Thread
+// Main Thread
+// Handles all non-critical channel I/O: PPM, BT, PWM, analog inputs,
+// auxiliary functions, joystick output, proximity sensor, and button handling
 //----------------------------------------------------------------------
 
-void calculate_Thread()
+void main_Thread()
 {
-  LOG_INF("Calculate Thread Loaded");
+  LOG_INF("Main Thread Loaded");
   while (1) {
     // Do not execute below until after initialization has happened
-    k_poll(calculateRunEvents, 1, K_FOREVER);
+    k_poll(channelRunEvents, 1, K_FOREVER);
 
     if (k_sem_count_get(&flashWriteSemaphore) == 1) {
       k_msleep(10);
@@ -466,25 +463,129 @@ void calculate_Thread()
 
     usduration = micros64();
 
-    // Process button events from queue
-    button_event_t btn_event;
-    if (k_msgq_get(&button_msgq, &btn_event, K_NO_WAIT) == 0) {
-        if (btn_event.long_press) {
-            LOG_INF("Reset Center Long Pressed");
-            trpOutputEnabled = !trpOutputEnabled;
-            
-            // Send to remote if in BT mode
-            if (BTGetMode() == BTPARARMT) {
-                BTRmtSendButtonPress(true);
+    /* ************************************************************
+     *       Build channel data
+     *
+     * Build Channel Data
+     *   1) Handle reset triggers (proximity, button, tilt)
+     *   2) Set PPMin channels
+     *   3) Set SBUSin channels
+     *   4) Set received BT channels
+     *   5) Set auxiliary functions
+     *   6) Set analog channels
+     *   7) Configure UART output
+     *   8) Merge TRP data from TRP thread
+     *   9) Output to PPMout
+     *  10) Output to Bluetooth
+     *  11) Output PWM channels
+     *  12) Output to USB Joystick
+     */
+
+    // Initialize channel data array
+    uint16_t local_channel_data[16] = {0};
+
+    // ========================================
+    // 1) Reset Triggers & Button Handling
+    // ========================================
+
+#if defined(HAS_APDS9960)
+    // Reset Center on Proximity detection
+    static int proximitycount = 0;
+    static int minproximity = 100;  // Keeps smallest proximity read.
+    static int maxproximity = 0;    // Keeps largest proximity value read.
+    if (blesenseboard && proximitycount++ >= PROXIMITY_UPDATE_INTERVAL) {
+      proximitycount = 0;
+      if (trkset.getRstOnWave()) {
+        // Reset on Proximity
+        int proximity = APDS.readProximity();
+        if (proximity != 1) {
+          // Store High and Low Values, Generate reset thresholds
+          maxproximity = MAX(proximity, maxproximity);
+          minproximity = MIN(proximity, minproximity);
+          int lowthreshold = minproximity + APDS_HYSTERISIS;
+          int highthreshold = maxproximity - APDS_HYSTERISIS;
+
+          // Don't allow reset if high and low thresholds are too close
+          if (highthreshold - lowthreshold > APDS_HYSTERISIS * 2) {
+            if (proximity < lowthreshold && lastproximity == false) {
+              pressButton();
+              LOG_INF("Reset center from a close proximity");
+              lastproximity = true;
+            } else if (proximity > highthreshold) {
+              // Clear flag on proximity clear
+              lastproximity = false;
             }
+          }
         }
-        if (btn_event.short_press) {
-            // Will be handled below for reset pulse
-            butdwn = true;
+      }
+    }
+#endif
+
+    // --- Button press handling ---
+    
+    static float pulsetimer = 0;
+    static bool sendingresetpulse = false;
+    
+    // Check for short press (recenter)
+    if (wasButtonPressed()) {
+        LOG_INF("Reset Center Short Pressed");
+
+        // Signal TRP thread to capture current orientation
+        recenter_requested = true;
+        
+        // Start reset pulse on alert channel
+        sendingresetpulse = true;
+        pulsetimer = 0.0f;
+        
+        // Send to remote if in BT mode
+        if (BTGetMode() == BTPARARMT) {
+            BTRmtSendButtonPress(false);
+        }
+    }
+    
+    // Check for long press (toggle TRP output)
+    if (wasButtonLongPressed()) {
+        LOG_INF("Reset Center Long Pressed");
+        trpOutputEnabled = !trpOutputEnabled;
+        
+        // Send to remote if in BT mode
+        if (BTGetMode() == BTPARARMT) {
+            BTRmtSendButtonPress(true);
         }
     }
 
-    // Reset on tilt
+    // Output reset pulse on alert channel
+    int alertch = trkset.getAlertCh();
+    if (alertch > 0) {
+        if (sendingresetpulse) {
+            // High pulse indicates reset/calibration
+            local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::DEF_MAX_PWM;
+            
+            // Update pulse timer and end pulse after duration
+            pulsetimer += (float)CALCULATE_PERIOD / 1000000.0f;
+            if (pulsetimer > TrackerSettings::RECENTER_PULSE_DURATION) {
+                sendingresetpulse = false;
+            }
+        } else {
+            // Normal state - low indicates gyro calibration status
+            local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::DEF_MIN_PWM : TrackerSettings::MIN_PWM;
+        }
+    }
+
+    // Handle TRP output enable/disable based on long press mode setting
+    static bool lastbutmode = false;
+    bool buttonpresmode = trkset.getButLngPs();
+    if (!buttonpresmode) {
+        // Long press mode disabled - TRP always enabled
+        trpOutputEnabled = true;
+    } else if (!lastbutmode && buttonpresmode) {
+        // Long press mode just enabled - disable TRP until user toggles it
+        trpOutputEnabled = false;
+    }
+    lastbutmode = buttonpresmode;
+
+    // --- Reset on tilt detection ---
+    
     static bool doresetontilt = false;
     if (trkset.getRstOnTlt()) {
       static bool tiltpeak = false;
@@ -538,28 +639,10 @@ void calculate_Thread()
       timetoreset += (float)CALCULATE_PERIOD / 1000000.0f;
     }
 
-    /* ************************************************************
-     *       Build channel data
-     *
-     * Build Channel Data
-     *   1) Reset all channels to disabled
-     *   2) Set PPMin channels
-     *   3) Set SBUSin channels
-     *   4) Set received BT channels
-     *   5) Set auxiliary functions
-     *   6) Set analog channels
-     *   7) Set Reset Center pulse channel
-     *   8) Merge TRP data from sensor thread
-     *   9) Output to PPMout
-     *  10) Output to Bluetooth
-     *  11) Output PWM channels
-     *  12) Output to USB Joystick
-     */
-
-    // 1) Reset all Channels to zero which means they have no data
-    uint16_t local_channel_data[16] = {0};
-
-    // 2) Read all PPM inputs
+    // ========================================
+    // 2) Read PPM Input Channels
+    // ========================================
+    
     PpmIn_execute();
     for (int i = 0; i < 16; i++)
       ppm_in_chans[i] = 0;
@@ -570,7 +653,10 @@ void calculate_Thread()
       }
     }
 
-    // 3) Set all incoming UART values (Sbus/Crsf)
+    // ========================================
+    // 3) Read UART Input Channels (SBUS/CRSF)
+    // ========================================
+    
     bool isUartValid = UartGetChannels(uart_in_chans);
     static bool lostmsgsent = false;
     static bool recmsgsent = false;
@@ -591,7 +677,10 @@ void calculate_Thread()
       lostmsgsent = false;
     }
 
-    // 4) Set all incoming BT values
+    // ========================================
+    // 4) Read Bluetooth Input Channels
+    // ========================================
+    
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++)
       bt_chans[i] = 0;
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
@@ -602,7 +691,10 @@ void calculate_Thread()
       }
     }
 
-    // 5) Set Auxiliary Functions
+    // ========================================
+    // 5) Set Auxiliary Function Channels
+    // ========================================
+    
     int aux0ch = trkset.getAux0Ch();
     int aux1ch = trkset.getAux1Ch();
     int aux2ch = trkset.getAux2Ch();
@@ -613,7 +705,10 @@ void calculate_Thread()
       assign_channel(local_channel_data, aux2ch, auxdata[trkset.getAux2Func()]);
     }
 
-    // 6) Set Analog Channels
+    // ========================================
+    // 6) Read Analog Input Channels
+    // ========================================
+    
 #ifdef ANVOLTMON
     float anbatt = SF1eFilterDo(anVoltFilter, analogRead(ANVOLTMON));
     anbatt *= ANVOLTMON_SCALE;
@@ -641,51 +736,10 @@ void calculate_Thread()
     }
 #endif
 
-    // 7) Handle reset center pulse
-    bool initiatereset = false;
-    if (butdwn) {
-      butdwn = false;
-      initiatereset = true;
-      
-      // Send to remote if in BT mode
-      if (BTGetMode() == BTPARARMT) {
-        BTRmtSendButtonPress(false);
-      }
-    }
-
-    static float pulsetimer = 0;
-    static bool sendingresetpulse = false;
-    int alertch = trkset.getAlertCh();
-    if (alertch > 0) {
-      // Indicate gyro calibration and centering status
-      if (sendingresetpulse) {
-        local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::MAX_PWM : TrackerSettings::DEF_MAX_PWM;
-      } else {
-        local_channel_data[alertch - 1] = gyroCalibrated ? TrackerSettings::DEF_MIN_PWM : TrackerSettings::MIN_PWM;
-      }
-      if (initiatereset) {
-        sendingresetpulse = true;
-        pulsetimer = 0.0f;
-      }
-      if (sendingresetpulse) {
-        pulsetimer += (float)CALCULATE_PERIOD / 1000000.0f;
-        if (pulsetimer > TrackerSettings::RECENTER_PULSE_DURATION) {
-          sendingresetpulse = false;
-        }
-      }
-    }
-
-    // Handle TRP output enable/disable
-    static bool lastbutmode = false;
-    bool buttonpresmode = trkset.getButLngPs();
-    if (buttonpresmode == false) {
-        trpOutputEnabled = true;
-    }
-    if (lastbutmode == false && buttonpresmode == true) {
-      trpOutputEnabled = false;
-    }
-    lastbutmode = buttonpresmode;
-
+    // ========================================
+    // 7) Configure UART Output
+    // ========================================
+    
     // If uart output set to CRSF_OUT, force channel 5 (AUX1/ARM) to high
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
       if (trkset.getCh5Arm()) {
@@ -693,8 +747,11 @@ void calculate_Thread()
       }
     }
 
-    // 8) Merge TRP data from sensor thread via message queue
-    // Note: For CRSF fast mode, TRP is written directly by sensor thread to channel_data
+    // ========================================
+    // 8) Merge TRP Data from TRP Thread
+    // ========================================
+    
+    // Note: For CRSF fast mode, TRP is written directly by TRP thread to channel_data
     // This message queue path is for non-time-critical outputs (PPM, BT, PWM, Joystick)
     trp_update_t trp_data;
     if (k_msgq_get(&trp_msgq, &trp_data, K_NO_WAIT) == 0) {
@@ -705,15 +762,15 @@ void calculate_Thread()
     }
 
     // For non-CRSF modes: Copy non-TRP channels to channel_data (centering zeros)
-    // For CRSF mode: TRP channels already written by sensor thread, we just handle other channels
-    // Use k_sched_lock to prevent race condition with sensor thread
+    // For CRSF mode: TRP channels already written by TRP thread, we just handle other channels
+    // Use k_sched_lock to prevent race condition with TRP thread
     int tlti = trkset.getTltCh() - 1;
     int rlli = trkset.getRllCh() - 1;
     int pani = trkset.getPanCh() - 1;
 
     k_sched_lock();
     for (int i = 0; i < 16; i++) {
-        // Skip TRP channels and actual rate channel - sensor thread owns these for CRSF fast path
+        // Skip TRP channels and actual rate channel - TRP thread owns these for CRSF fast path
         if (i == tlti || i == rlli || i == pani || i == CRSF_ACTUAL_RATE_CHANNEL - 1) {
             continue;
         }
@@ -723,7 +780,10 @@ void calculate_Thread()
     }
     k_sched_unlock();
 
-    // 9) Set the PPM Outputs
+    // ========================================
+    // 9) Output to PPM
+    // ========================================
+    
     PpmOut_execute();
     for (int i = 0; i < PpmOut_getChnCount(); i++) {
       uint16_t ppmout = local_channel_data[i];
@@ -731,14 +791,20 @@ void calculate_Thread()
       PpmOut_setChannel(i, ppmout);
     }
 
-    // 10) Set all the BT Channels
+    // ========================================
+    // 10) Output to Bluetooth
+    // ========================================
+    
     bool bleconnected = BTGetConnected();
     trkset.setDataBtAddr(BTGetAddress());
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++) {
       BTSetChannel(i, local_channel_data[i]);
     }
 
-    // 11) Set PWM Channels
+    // ========================================
+    // 11) Output to PWM Channels
+    // ========================================
+    
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
     for (int i = 0; i < 4; i++) {
       int pwmch = pwmchs[i] - 1;
@@ -749,20 +815,26 @@ void calculate_Thread()
       }
     }
 
-    // 12) Set USB Joystick Channels, Only 8 channels, Half rate or USB is overwhelmed
+    // ========================================
+    // 12) Output to USB Joystick
+    // ========================================
+    
+    // Only 8 channels, half rate or USB is overwhelmed
     static uint32_t joystick_update = 0;
     if(joystick_update++ > 1) {
       joystick_update = 0;
       set_JoystickChannels(local_channel_data);
     }
 
-    // Update the settings for the GUI
-    // Get latest sensor data from sensor thread
-    sensor_data_t sensor_snapshot = {0};  // Initialize to zero to avoid uninitialized warnings
-    if (k_mutex_lock(&sensor_data_mutex, K_NO_WAIT) == 0) {
-        sensor_snapshot = shared_sensor_data;
-        k_mutex_unlock(&sensor_data_mutex);
-    }
+    // ========================================
+    // Update GUI Data
+    // ========================================
+    
+    // Get latest sensor data from TRP thread
+    sensor_data_t sensor_snapshot = {0};
+    k_sched_lock();
+    sensor_snapshot = shared_sensor_data;
+    k_sched_unlock();
 
     // Update GUI data (only if we can get the lock)
     if (k_mutex_lock(&data_mutex, K_NO_WAIT) == 0) {
@@ -809,11 +881,15 @@ void calculate_Thread()
       k_mutex_unlock(&data_mutex);
     }
 
+    // ========================================
+    // Thread Timing Control
+    // ========================================
+    
     // Adjust sleep for a more accurate period
     usduration = micros64() - usduration;
     if (CALCULATE_PERIOD - usduration <
         CALCULATE_PERIOD * 0.7) {  // Took a long time. Will crash if sleep is too short
-      LOG_ERR("Calculate Thread Overrun %lld", usduration);
+      LOG_ERR("Main Thread Overrun %lld", usduration);
       k_usleep(CALCULATE_PERIOD);
     } else {
       k_usleep(CALCULATE_PERIOD - usduration);
@@ -824,7 +900,7 @@ void calculate_Thread()
     static int64_t mmic = millis64() + 1000;
     if (mmic < millis64()) {  // Every Second
       mmic = millis64() + 1000;
-      LOG_INF("Calc Rate = %d", mcount);
+      LOG_INF("Main Thread Rate = %d", mcount);
       mcount = 0;
     }
     mcount++;
@@ -833,12 +909,14 @@ void calculate_Thread()
 }
 
 //----------------------------------------------------------------------
-// Sensor Reading Thread
+// TRP Calculation Thread (Critical Path)
+// Reads IMU sensors, performs sensor fusion, calculates TRP outputs,
+// and writes directly to UART for minimum latency
 //----------------------------------------------------------------------
 
-void sensor_Thread()
+void trp_Thread()
 {
-  LOG_INF("Sensor Thread Loaded");
+  LOG_INF("TRP Thread Loaded");
   
   // Thread-local state
   axis_t racc = {{0, 0, 0}};
@@ -850,7 +928,7 @@ void sensor_Thread()
   
   while (1) {
     // Do not execute below until after initialization has happened
-    k_poll(senseRunEvents, 1, K_FOREVER);
+    k_poll(trpRunEvents, 1, K_FOREVER);
 
     if (k_sem_count_get(&flashWriteSemaphore) == 1) {
       k_msleep(10);
@@ -858,39 +936,6 @@ void sensor_Thread()
     }
 
     senseUsDuration = micros64();
-
-#if defined(HAS_APDS9960)
-    // Reset Center on Proximity, Don't need to update this often
-    static int sensecount = 0;
-    static int minproximity = 100;  // Keeps smallest proximity read.
-    static int maxproximity = 0;    // Keeps largest proximity value read.
-    if (blesenseboard && sensecount++ >= PROXIMITY_UPDATE_INTERVAL) {
-      sensecount = 0;
-      if (trkset.getRstOnWave()) {
-        // Reset on Proximity
-        int proximity = APDS.readProximity();
-        if (proximity != 1) {
-          // Store High and Low Values, Generate reset thresholds
-          maxproximity = MAX(proximity, maxproximity);
-          minproximity = MIN(proximity, minproximity);
-          int lowthreshold = minproximity + APDS_HYSTERISIS;
-          int highthreshold = maxproximity - APDS_HYSTERISIS;
-
-          // Don't allow reset if high and low thresholds are too close
-          if (highthreshold - lowthreshold > APDS_HYSTERISIS * 2) {
-            if (proximity < lowthreshold && lastproximity == false) {
-              pressButton();
-              LOG_INF("Reset center from a close proximity");
-              lastproximity = true;
-            } else if (proximity > highthreshold) {
-              // Clear flag on proximity clear
-              lastproximity = false;
-            }
-          }
-        }
-      }
-    }
-#endif
 
     // Setup Rotations
     float rotation[3] = {trkset.getRotX(), trkset.getRotY(), trkset.getRotZ()};
@@ -1086,20 +1131,17 @@ void sensor_Thread()
       madgsensbits |= MADGINIT_MAG;
     }
 
-    // Update shared sensor data for calculate thread
-    if (k_mutex_lock(&sensor_data_mutex, K_NO_WAIT) == 0) {
-        shared_sensor_data.acc = acc;
-        shared_sensor_data.gyr = gyr;
-        shared_sensor_data.mag = mag;
-        shared_sensor_data.raw_acc = racc;
-        shared_sensor_data.raw_gyr = rgyr;
-        shared_sensor_data.raw_mag = rmag;
-        shared_sensor_data.acc_valid = accValid;
-        shared_sensor_data.gyr_valid = gyrValid;
-        shared_sensor_data.mag_valid = magValid;
-        shared_sensor_data.timestamp = micros64();
-        k_mutex_unlock(&sensor_data_mutex);
-    }
+    // Update shared sensor data for channel thread (no lock needed - TRP has higher priority)
+    shared_sensor_data.acc = acc;
+    shared_sensor_data.gyr = gyr;
+    shared_sensor_data.mag = mag;
+    shared_sensor_data.raw_acc = racc;
+    shared_sensor_data.raw_gyr = rgyr;
+    shared_sensor_data.raw_mag = rmag;
+    shared_sensor_data.acc_valid = accValid;
+    shared_sensor_data.gyr_valid = gyrValid;
+    shared_sensor_data.mag_valid = magValid;
+    shared_sensor_data.timestamp = micros64();
 
     // Run Gyro Calibration, only on good gyro data
     if (gyrValid) {
@@ -1157,20 +1199,13 @@ void sensor_Thread()
       }
     }
 
-    // Check for button press and send via message queue
-    if (wasButtonPressed()) {
-      LOG_INF("Reset Center Short Pressed");
-      rolloffset = roll;
-      panoffset = pan;
-      tiltoffset = tilt;
-      
-      button_event_t evt = {.short_press = true, .long_press = false};
-      k_msgq_put(&button_msgq, &evt, K_NO_WAIT);
-    }
-    
-    if (wasButtonLongPressed()) {
-      button_event_t evt = {.short_press = false, .long_press = true};
-      k_msgq_put(&button_msgq, &evt, K_NO_WAIT);
+    // Check for recenter request from channel thread
+    if (recenter_requested) {
+        recenter_requested = false;
+        LOG_DBG("Recentering to current orientation");
+        rolloffset = roll;
+        panoffset = pan;
+        tiltoffset = tilt;
     }
 
     // Calculate outputs
@@ -1196,14 +1231,14 @@ void sensor_Thread()
     uint16_t rate_channel_val = crsfActualRate / 2 + 1500;
 
     // CRITICAL FAST PATH: Write TRP directly to shared channel_data for minimum latency
-    // This bypasses message queues and calculate thread for time-critical outputs
+    // This bypasses message queues and channel thread for time-critical UART output
     if (tltch > 0 && tltch <= 16) channel_data[tltch - 1] = final_tilt;
     if (rllch > 0 && rllch <= 16) channel_data[rllch - 1] = final_roll;
     if (panch > 0 && panch <= 16) channel_data[panch - 1] = final_pan;
     channel_data[CRSF_ACTUAL_RATE_CHANNEL - 1] = rate_channel_val;
 
-    // Also send to calculate thread for non-time-critical outputs (PPM, BT, PWM, Joystick)
-    // This allows calculate thread to merge TRP with other channel sources
+    // Also send to channel thread for non-time-critical outputs (PPM, BT, PWM, Joystick)
+    // This allows channel thread to merge TRP with other channel sources
     trp_update_t trp_update = {
         .tilt_ch = tltch,
         .roll_ch = rllch,
@@ -1232,8 +1267,8 @@ void sensor_Thread()
     trkset.setDataRollOut(rollout_ui);
     trkset.setDataPanOut(panout_ui);
 
-    // CRITICAL FAST PATH: CRSF output directly from sensor thread for minimum latency
-    // No message queues, no waiting for calculate thread
+    // CRITICAL FAST PATH: CRSF output directly from TRP thread for minimum latency
+    // No message queues, no waiting for channel thread
     uint32_t sensorPeriod = SENSOR_PERIOD;
     if (trkset.getUartMode() == TrackerSettings::UART_MODE_CRSFOUT) {
       uint32_t crsfRate = ((trkset.getCrsfTxRate()+1) * 2);
@@ -1247,7 +1282,7 @@ void sensor_Thread()
     senseUsDuration = micros64() - senseUsDuration;
     if (sensorPeriod - senseUsDuration <
         sensorPeriod * 0.4) {  // Took a long time. Will crash if sleep is too short
-      LOG_ERR("Sensor Thread Overrun %lld", senseUsDuration);
+      LOG_ERR("TRP Thread Overrun %lld", senseUsDuration);
       k_usleep(sensorPeriod);
     } else {
       k_usleep(sensorPeriod - senseUsDuration);
@@ -1268,12 +1303,9 @@ void detectDoubleTap()
 {
   // Get sensor data from shared state
   axis_t local_racc;
-  if (k_mutex_lock(&sensor_data_mutex, K_NO_WAIT) == 0) {
-      local_racc = shared_sensor_data.raw_acc;
-      k_mutex_unlock(&sensor_data_mutex);
-  } else {
-      return;  // Can't get lock, skip this iteration
-  }
+  k_sched_lock();
+  local_racc = shared_sensor_data.raw_acc;
+  k_sched_unlock();
   
   static float last_acc_mag = 0;
   static uint64_t lasttaptime = 0;
@@ -1306,15 +1338,9 @@ void detectDoubleTap()
 
 void gyroCalibrate()
 {
-  // Get sensor data from shared state
-  axis_t local_rgyr, local_racc;
-  if (k_mutex_lock(&sensor_data_mutex, K_NO_WAIT) == 0) {
-      local_rgyr = shared_sensor_data.raw_gyr;
-      local_racc = shared_sensor_data.raw_acc;
-      k_mutex_unlock(&sensor_data_mutex);
-  } else {
-      return;  // Can't get lock, skip this iteration
-  }
+  // Get sensor data from shared state (no lock needed - TRP has higher priority)
+  axis_t local_rgyr = shared_sensor_data.raw_gyr;
+  axis_t local_racc = shared_sensor_data.raw_acc;
   
   static float last_gyro_mag = 0;
   static float last_acc_mag = 0;
@@ -1475,15 +1501,10 @@ void buildAuxData()
 {
   // Get sensor data from shared state
   axis_t local_gyr, local_acc;
-  if (k_mutex_lock(&sensor_data_mutex, K_NO_WAIT) == 0) {
-      local_gyr = shared_sensor_data.gyr;
-      local_acc = shared_sensor_data.acc;
-      k_mutex_unlock(&sensor_data_mutex);
-  } else {
-      // Can't get lock, use zeros
-      local_gyr = (axis_t){{0, 0, 0}};
-      local_acc = (axis_t){{0, 0, 0}};
-  }
+  k_sched_lock();
+  local_gyr = shared_sensor_data.gyr;
+  local_acc = shared_sensor_data.acc;
+  k_sched_unlock();
   
   float pwmrange = (TrackerSettings::MAX_PWM - TrackerSettings::MIN_PWM);
   auxdata[TrackerSettings::AUX_GYRX] = (local_gyr.x / 1000) * pwmrange + TrackerSettings::PPM_CENTER;

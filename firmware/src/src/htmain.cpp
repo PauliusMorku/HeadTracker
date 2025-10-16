@@ -1,4 +1,3 @@
-
 #include "htmain.h"
 
 #include <zephyr/logging/log.h>
@@ -75,7 +74,7 @@ void start(void)
     setLEDFlag(LED_HARDFAULT);
   }
 
-  // Actual Calculations - sense.cpp
+  // TRP Calculations and UART output - sense.cpp
   LOG_INF("Sense starting");
   if(sense_Init()) {
     LOG_ERR("Sense initialization failed");
@@ -148,7 +147,7 @@ K_THREAD_DEFINE(serial_Thread_id, SERIAL_STACK_SIZE, serial_Thread, NULL, NULL, 
 #if defined(CONFIG_BT)
 K_THREAD_DEFINE(bt_Thread_id, BT_STACK_SIZE, bt_Thread, NULL, NULL, NULL, BT_THREAD_PRIO, 0, 0);
 #endif
-K_THREAD_DEFINE(sensor_Thread_id, SENSOR_STACK_SIZE, sensor_Thread, NULL, NULL, NULL, SENSOR_THREAD_PRIO, K_FP_REGS, 1500);
-K_THREAD_DEFINE(calculate_Thread_id, CALCULATE_STACK_SIZE, calculate_Thread, NULL, NULL, NULL, CALCULATE_THREAD_PRIO, K_FP_REGS, 2000);
-K_THREAD_DEFINE(uartTx_Thread_ID, UARTTX_STACK_SIZE, uartTx_Thread, NULL, NULL, NULL, UARTTX_THREAD_PRIO, 0, 1000);
-K_THREAD_DEFINE(uartRx_Thread_ID, UARTRX_STACK_SIZE, uartRx_Thread, NULL, NULL, NULL, UARTRX_THREAD_PRIO, 0, 1000);
+K_THREAD_DEFINE(trp_Thread_id, SENSOR_STACK_SIZE, trp_Thread, NULL, NULL, NULL, TRP_THREAD_PRIO, K_FP_REGS, 1500);
+K_THREAD_DEFINE(main_Thread_id, CALCULATE_STACK_SIZE, main_Thread, NULL, NULL, NULL, MAIN_THREAD_PRIO, K_FP_REGS, 2000);
+K_THREAD_DEFINE(uartTx_Thread_id, UARTTX_STACK_SIZE, uartTx_Thread, NULL, NULL, NULL, UARTTX_THREAD_PRIO, 0, 1000);
+K_THREAD_DEFINE(uartRx_Thread_id, UARTRX_STACK_SIZE, uartRx_Thread, NULL, NULL, NULL, UARTRX_THREAD_PRIO, 0, 1000);
