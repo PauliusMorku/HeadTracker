@@ -65,9 +65,9 @@
 #include "BMM150/bmm150_common.h"
 #endif
 
-#define CRSF_ACTUAL_RATE_CHANNEL 12
+#define CRSF_ACTUAL_RATE_CHANNEL 12  // Channel for displaying actual CRSF transmission rate in OSD
 
-#define PROXIMITY_UPDATE_INTERVAL 10
+#define PROXIMITY_UPDATE_INTERVAL 10  // Proximity sensor update interval in main thread cycles
 
 // #define DEBUG_SENSOR_RATES
 
@@ -272,7 +272,7 @@ int sense_Init()
 
 #if defined(HAS_LSM9DS1)
   if (!IMU.begin()) {
-    LOG_ERR("Failed to initalize LSM9DS1 Sensor");
+    LOG_ERR("Failed to initialize LSM9DS1 Sensor");
     return -1;
   }
   hasAcc = true;
@@ -300,7 +300,7 @@ int sense_Init()
     hasAcc = true;
     hasGyr = true;
   } else {
-    LOG_ERR("Failed to initalize BMI270");
+    LOG_ERR("Failed to initialize BMI270");
     return -1;
     }
 #endif
@@ -367,7 +367,7 @@ int sense_Init()
 #endif
 
 #if defined(HAS_APDS9960)
-  // Initalize Gesture Sensor
+  // Initialize Gesture Sensor
   if (APDS.begin()) {
     blesenseboard = true;
     LOG_INF("APDS9960 Proximity Sensor Found");
@@ -440,18 +440,19 @@ void main_Thread()
      *       Build channel data
      *
      * Build Channel Data
-     *   1) Handle reset triggers (proximity, button, tilt)
-     *   2) Set PPMin channels
-     *   3) Set SBUSin channels
-     *   4) Set received BT channels
-     *   5) Set auxiliary functions
-     *   6) Set analog channels
-     *   7) Configure UART output
-     *   8) Merge TRP data from TRP thread
-     *   9) Output to PPMout
-     *  10) Output to Bluetooth
-     *  11) Output PWM channels
-     *  12) Output to USB Joystick
+     *   1) Read TRP data from TRP thread
+     *   2) Handle reset triggers (proximity, button, tilt)
+     *   3) Set PPMin channels
+     *   4) Set SBUSin channels
+     *   5) Set received BT channels
+     *   6) Set auxiliary functions
+     *   7) Set analog channels
+     *   8) Configure UART output
+     *   9) Merge TRP data from TRP thread
+     *  10) Output to PPMout
+     *  11) Output to Bluetooth
+     *  12) Output PWM channels
+     *  13) Output to USB Joystick
      */
 
     // ========================================
@@ -475,7 +476,7 @@ void main_Thread()
     k_sched_unlock();
 
     // ========================================
-    // 1) Reset Triggers & Button Handling
+    // 2) Reset Triggers & Button Handling
     // ========================================
 
     // Initialize channel data array
@@ -633,7 +634,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 2) Read PPM Input Channels
+    // 3) Read PPM Input Channels
     // ========================================
 
     PpmIn_execute();
@@ -647,7 +648,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 3) Read UART Input Channels (SBUS/CRSF)
+    // 4) Read UART Input Channels (SBUS/CRSF)
     // ========================================
     
     bool isUartValid = UartGetChannels(uart_in_chans);
@@ -671,7 +672,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 4) Read Bluetooth Input Channels
+    // 5) Read Bluetooth Input Channels
     // ========================================
     
     for (int i = 0; i < TrackerSettings::BT_CHANNELS; i++)
@@ -685,7 +686,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 5) Set Auxiliary Function Channels
+    // 6) Set Auxiliary Function Channels
     // ========================================
     
     int aux0ch = trkset.getAux0Ch();
@@ -710,7 +711,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 6) Read Analog Input Channels
+    // 7) Read Analog Input Channels
     // ========================================
     
 #ifdef ANVOLTMON
@@ -741,7 +742,7 @@ void main_Thread()
 #endif
 
     // ========================================
-    // 7) Configure UART Output
+    // 8) Configure UART Output
     // ========================================
     
     // If uart output set to CRSF_OUT, force channel 5 (AUX1/ARM) to high
@@ -752,7 +753,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 8) Merge TRP Data from TRP Thread
+    // 9) Merge TRP Data from TRP Thread
     // ========================================
     
     // Get channel assignments
@@ -786,7 +787,7 @@ void main_Thread()
     k_sched_unlock();
 
     // ========================================
-    // 9) Output to PPM
+    // 10) Output to PPM
     // ========================================
     
     PpmOut_execute();
@@ -797,7 +798,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 10) Output to Bluetooth
+    // 11) Output to Bluetooth
     // ========================================
     
     bool bleconnected = BTGetConnected();
@@ -807,7 +808,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 11) Output to PWM Channels
+    // 12) Output to PWM Channels
     // ========================================
     
     int8_t pwmchs[4] = {trkset.getPwm0(), trkset.getPwm1(), trkset.getPwm2(), trkset.getPwm3()};
@@ -821,7 +822,7 @@ void main_Thread()
     }
 
     // ========================================
-    // 12) Output to USB Joystick
+    // 13) Output to USB Joystick
     // ========================================
     
     // Only 8 channels, half rate or USB is overwhelmed
@@ -993,7 +994,7 @@ void trp_Thread()
     lsm6ds3tr_c_reg_t reg;
     lsm6ds3tr_c_status_reg_get(&dev_ctx, &reg.status_reg);
     if (reg.status_reg.xlda) {
-      /* Read magnetic field data */
+      /* Read acceleration data */
       memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
       lsm6ds3tr_c_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
       tacc.x = (float)lsm6ds3tr_c_from_fs2g_to_mg(data_raw_acceleration[0]) / 1000.0f;
@@ -1095,7 +1096,7 @@ void trp_Thread()
         // Apply Rotation
         rotate(mag.data, rotation);
 
-        // For inital orientation setup
+        // For initial orientation setup
         madgsensbits |= MADGINIT_MAG;
       }
     } else {
@@ -1357,7 +1358,7 @@ void gyroCalibrate()
   float acc_dif = (acc_magnitude - last_acc_mag) / deltatime;
   last_acc_mag = acc_magnitude;
 
-  // Is Gyro anc Accelerometer stable?
+  // Is Gyro and Accelerometer stable?
   if (fabsf(gyro_dif) < GYRO_STABLE_DIFF && fabsf(acc_dif) < ACC_STABLE_DIFF) {
     // First run, preload filter
     if (filter_samples == 0) {
